@@ -31,3 +31,24 @@ O `background.js` escuta `webRequest.onBeforeRequest` para todas as URLs. Uma re
 - O badge do ícone mostra quantos domínios de 3ª parte distintos a página contatou.
 
 **Limitação:** sem build não embutimos a Public Suffix List completa. Usamos uma lista reduzida de sufixos compostos (`com.br`, `co.uk`, `github.io`…); nos demais casos o eTLD+1 são os dois últimos rótulos. Domínios sob sufixos fora dessa lista podem ser agrupados incorretamente.
+
+### Cookies injetados
+
+O `background.js` escuta `webRequest.onHeadersReceived` (com `responseHeaders`) e interpreta cada cabeçalho `Set-Cookie` recebido pela aba, seguindo a RFC 6265. O Firefox entrega vários `Set-Cookie` de uma mesma resposta em um único valor separado por quebra de linha, que é dividido antes da análise.
+
+Cada cookie é identificado por `nome|domínio|path`; se o mesmo cookie for definido mais de uma vez, vale a última definição.
+
+| Classificação | Critério |
+|---|---|
+| **1ª parte** | eTLD+1 do domínio do cookie igual ao eTLD+1 da página |
+| **3ª parte** | eTLD+1 do domínio do cookie diferente do da página |
+| **Sessão** | sem `Max-Age` e sem `Expires`: some ao fechar o navegador |
+| **Persistente** | `Max-Age` > 0 ou `Expires` no futuro (`Max-Age` tem precedência) |
+
+- O domínio do cookie é o atributo `Domain`; na ausência dele, o host que respondeu.
+- `Set-Cookie` com `Max-Age <= 0` ou `Expires` no passado é uma **exclusão** e não é contado.
+- O popup mostra a matriz 1ª/3ª parte × sessão/persistente e a lista de cookies com expiração e atributos `Secure`, `HttpOnly` e `SameSite`.
+
+**Limitações:**
+- Cookies criados por JavaScript (`document.cookie`) não trafegam em cabeçalho HTTP e não são capturados por este mecanismo.
+- A contagem é do que o servidor **tentou** definir. Com a Proteção Aprimorada contra Rastreamento do Firefox, requisições a rastreadores conhecidos podem ser bloqueadas antes da resposta, e cookies de 3ª parte são particionados por site (Total Cookie Protection).

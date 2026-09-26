@@ -52,7 +52,8 @@ function isThirdParty(requestHost, pageHost) {
 // tabData[tabId] = {
 //   pageUrl, pageHost, startedAt,
 //   totalRequests,
-//   thirdParty: { [baseDomain]: { hosts: Set, count, types: { [type]: n } } }
+//   thirdParty: { [baseDomain]: { hosts: Set, count, types: { [type]: n } } },
+//   cookies: { [nome|domínio|path]: { name, domain, path, thirdParty, session, ... } }
 // }
 const tabData = {};
 
@@ -62,13 +63,26 @@ function resetTab(tabId, url) {
     pageHost: getHostname(url),
     startedAt: Date.now(),
     totalRequests: 0,
-    thirdParty: {}
+    thirdParty: {},
+    cookies: {}
   };
   updateBadge(tabId);
 }
 
 function getTab(tabId) {
   return tabData[tabId] || null;
+}
+
+// Extensão carregada com a aba já aberta: inicializa usando a origem do documento
+function ensureTab(details) {
+  let tab = getTab(details.tabId);
+  if (!tab) {
+    const origin = details.documentUrl || details.originUrl;
+    if (!origin) return null;
+    resetTab(details.tabId, origin);
+    tab = getTab(details.tabId);
+  }
+  return tab;
 }
 
 // ---------------------------------------------------------------------------
@@ -84,14 +98,8 @@ browser.webRequest.onBeforeRequest.addListener(
       return;
     }
 
-    let tab = getTab(details.tabId);
-    if (!tab) {
-      // Extensão carregada com a aba já aberta: usa a origem do documento
-      const origin = details.documentUrl || details.originUrl;
-      if (!origin) return;
-      resetTab(details.tabId, origin);
-      tab = getTab(details.tabId);
-    }
+    const tab = ensureTab(details);
+    if (!tab) return;
 
     tab.totalRequests++;
 
@@ -110,6 +118,100 @@ browser.webRequest.onBeforeRequest.addListener(
     updateBadge(details.tabId);
   },
   { urls: ["<all_urls>"] }
+);
+
+// ---------------------------------------------------------------------------
+// Cookies injetados via cabeçalho Set-Cookie
+// ---------------------------------------------------------------------------
+// Interpreta uma linha Set-Cookie (RFC 6265). Retorna null se for inválida.
+function parseSetCookie(line) {
+  const parts = line.split(";");
+  const nameValue = parts.shift();
+  const eq = nameValue.indexOf("=");
+  if (eq < 0) return null;
+
+  const cookie = {
+    name: nameValue.slice(0, eq).trim(),
+    domain: null,
+    path: "/",
+    expires: null,
+    maxAge: null,
+    secure: false,
+    httpOnly: false,
+    sameSite: null
+  };
+
+  for (const part of parts) {
+    const i = part.indexOf("=");
+    const key = (i < 0 ? part : part.slice(0, i)).trim().toLowerCase();
+    const val = i < 0 ? "" : part.slice(i + 1).trim();
+    if (key === "domain" && val) cookie.domain = val.replace(/^\./, "").toLowerCase();
+    else if (key === "path" && val) cookie.path = val;
+    else if (key === "expires") {
+      const t = Date.parse(val);
+      if (!isNaN(t)) cookie.expires = t;
+    }
+    else if (key === "max-age" && /^-?\d+$/.test(val)) cookie.maxAge = parseInt(val, 10);
+    else if (key === "secure") cookie.secure = true;
+    else if (key === "httponly") cookie.httpOnly = true;
+    else if (key === "samesite") cookie.sameSite = val;
+  }
+  return cookie;
+}
+
+// Max-Age tem precedência sobre Expires. Sem nenhum dos dois o cookie é de sessão.
+// Retorna o instante de expiração, null (sessão) ou -1 (cookie sendo apagado).
+function cookieExpiry(cookie) {
+  const now = Date.now();
+  if (cookie.maxAge !== null) {
+    return cookie.maxAge <= 0 ? -1 : now + cookie.maxAge * 1000;
+  }
+  if (cookie.expires !== null) {
+    return cookie.expires <= now ? -1 : cookie.expires;
+  }
+  return null;
+}
+
+browser.webRequest.onHeadersReceived.addListener(
+  (details) => {
+    if (details.tabId < 0 || !details.responseHeaders) return;
+    const tab = ensureTab(details);
+    if (!tab) return;
+
+    const reqHost = getHostname(details.url);
+
+    for (const header of details.responseHeaders) {
+      if (header.name.toLowerCase() !== "set-cookie" || !header.value) continue;
+
+      // O Firefox junta vários Set-Cookie da mesma resposta separados por quebra de linha
+      for (const line of header.value.split("\n")) {
+        const cookie = parseSetCookie(line);
+        if (!cookie) continue;
+
+        const expiry = cookieExpiry(cookie);
+        if (expiry === -1) continue; // exclusão de cookie, não é injeção
+
+        // Sem atributo Domain o cookie pertence ao host que respondeu
+        const domain = cookie.domain || reqHost;
+        const key = `${cookie.name}|${domain}|${cookie.path}`;
+
+        tab.cookies[key] = {
+          name: cookie.name,
+          domain,
+          path: cookie.path,
+          setBy: reqHost,
+          thirdParty: isThirdParty(domain, tab.pageHost),
+          session: expiry === null,
+          expires: expiry,
+          secure: cookie.secure,
+          httpOnly: cookie.httpOnly,
+          sameSite: cookie.sameSite
+        };
+      }
+    }
+  },
+  { urls: ["<all_urls>"] },
+  ["responseHeaders"]
 );
 
 // ---------------------------------------------------------------------------
@@ -141,13 +243,24 @@ function serializeReport(tab) {
     }))
     .sort((a, b) => b.count - a.count);
 
+  const cookies = Object.values(tab.cookies)
+    .sort((a, b) => (b.thirdParty - a.thirdParty) || a.domain.localeCompare(b.domain));
+
+  const cookieSummary = { total: cookies.length, firstParty: 0, thirdParty: 0, session: 0, persistent: 0 };
+  for (const c of cookies) {
+    cookieSummary[c.thirdParty ? "thirdParty" : "firstParty"]++;
+    cookieSummary[c.session ? "session" : "persistent"]++;
+  }
+
   return {
     pageUrl: tab.pageUrl,
     pageHost: tab.pageHost,
     pageBaseDomain: getBaseDomain(tab.pageHost),
     totalRequests: tab.totalRequests,
     thirdPartyRequests: thirdParty.reduce((s, d) => s + d.count, 0),
-    thirdParty
+    thirdParty,
+    cookies,
+    cookieSummary
   };
 }
 

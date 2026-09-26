@@ -22,3 +22,23 @@ li {
 .domain { display: flex; justify-content: space-between; font-weight: 600; }
 .count { color: #c0392b; }
 .details { color: #666; font-size: 11px; word-break: break-all; }
+
+#third-party, #cookies { max-height: 220px; }
+
+table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
+th, td { padding: 4px 6px; text-align: center; border: 1px solid #eee; }
+th:first-child, td:first-child { text-align: left; }
+thead th { font-size: 11px; color: #555; background: #fafafa; }
+
+.tag {
+  display: inline-block;
+  padding: 0 5px;
+  margin-left: 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  background: #eee;
+  color: #555;
+}
+.tag.third { background: #fdecea; color: #c0392b; }
+.tag.persistent { background: #fff4e0; color: #b9770e; }
