@@ -18,7 +18,8 @@ const MULTI_PART_SUFFIXES = new Set([
 
 function getHostname(url) {
   try {
-    return new URL(url).hostname;
+    // Remove o ponto final de FQDNs ("example.com." -> "example.com")
+    return new URL(url).hostname.replace(/\.$/, "");
   } catch (e) {
     return null;
   }
