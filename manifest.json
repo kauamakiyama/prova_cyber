@@ -1,0 +1,29 @@
+{
+  "manifest_version": 2,
+  "name": "Privacy Guard",
+  "version": "0.1.0",
+  "description": "Detecta conexões a domínios de terceira parte durante a navegação.",
+
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "privacy-guard@insper.edu.br",
+      "strict_min_version": "91.0"
+    }
+  },
+
+  "permissions": [
+    "webRequest",
+    "tabs",
+    "<all_urls>"
+  ],
+
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": true
+  },
+
+  "browser_action": {
+    "default_title": "Privacy Guard",
+    "default_popup": "popup/popup.html"
+  }
+}

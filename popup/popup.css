@@ -1,0 +1,24 @@
+body {
+  width: 380px;
+  margin: 0;
+  padding: 12px;
+  font: 13px/1.4 system-ui, sans-serif;
+  color: #222;
+  background: #fff;
+}
+
+h1 { font-size: 16px; margin: 0 0 4px; }
+h2 { font-size: 13px; margin: 12px 0 6px; text-transform: uppercase; color: #555; }
+
+.muted { color: #777; font-size: 12px; word-break: break-all; }
+
+ul { list-style: none; margin: 0; padding: 0; max-height: 360px; overflow-y: auto; }
+
+li {
+  padding: 6px 0;
+  border-bottom: 1px solid #eee;
+}
+
+.domain { display: flex; justify-content: space-between; font-weight: 600; }
+.count { color: #c0392b; }
+.details { color: #666; font-size: 11px; word-break: break-all; }
