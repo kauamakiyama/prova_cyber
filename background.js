@@ -225,7 +225,8 @@ const STORAGE_APIS = ["localStorage", "sessionStorage", "indexedDB"];
 function getStorageEntry(tab, frameUrl) {
   let origin;
   try {
-    origin = new URL(frameUrl).origin;
+    // Remove o ponto final de FQDNs, como em getHostname()
+    origin = new URL(frameUrl).origin.replace(/\.(:\d+)?$/, "$1");
   } catch (e) {
     return null;
   }
