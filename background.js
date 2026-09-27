@@ -53,7 +53,9 @@ function isThirdParty(requestHost, pageHost) {
 //   pageUrl, pageHost, startedAt,
 //   totalRequests,
 //   thirdParty: { [baseDomain]: { hosts: Set, count, types: { [type]: n } } },
-//   cookies: { [nome|domínio|path]: { name, domain, path, thirdParty, session, ... } }
+//   cookies: { [nome|domínio|path]: { name, domain, path, thirdParty, session, ... } },
+//   storage: { [origem do frame]: { thirdParty, localStorage: Set, sessionStorage: Set,
+//              indexedDB: Set, blocked: Set, writes, scripts: Set } }
 // }
 const tabData = {};
 
@@ -64,7 +66,8 @@ function resetTab(tabId, url) {
     startedAt: Date.now(),
     totalRequests: 0,
     thirdParty: {},
-    cookies: {}
+    cookies: {},
+    storage: {}
   };
   updateBadge(tabId);
 }
@@ -215,6 +218,55 @@ browser.webRequest.onHeadersReceived.addListener(
 );
 
 // ---------------------------------------------------------------------------
+// Armazenamento HTML5 (eventos enviados pelo inject.js via content.js)
+// ---------------------------------------------------------------------------
+const STORAGE_APIS = ["localStorage", "sessionStorage", "indexedDB"];
+
+function getStorageEntry(tab, frameUrl) {
+  let origin;
+  try {
+    origin = new URL(frameUrl).origin;
+  } catch (e) {
+    return null;
+  }
+  if (!/^https?:/.test(origin)) return null;
+
+  let entry = tab.storage[origin];
+  if (!entry) {
+    entry = tab.storage[origin] = {
+      thirdParty: isThirdParty(getHostname(frameUrl), tab.pageHost),
+      localStorage: new Set(),
+      sessionStorage: new Set(),
+      indexedDB: new Set(),
+      blocked: new Set(),
+      writes: 0,
+      scripts: new Set()
+    };
+  }
+  return entry;
+}
+
+function handleStorageEvent(tab, frameUrl, ev) {
+  const entry = getStorageEntry(tab, frameUrl);
+  if (!entry) return;
+
+  if (ev.kind === "storage") {
+    if (STORAGE_APIS.includes(ev.api)) entry[ev.api].add(ev.key);
+    entry.writes++;
+    if (ev.script) entry.scripts.add(ev.script);
+  } else if (ev.kind === "snapshot") {
+    for (const api of STORAGE_APIS) {
+      if (ev[api] === null) {
+        // indexedDB.databases() indisponível não significa bloqueio
+        if (api !== "indexedDB") entry.blocked.add(api);
+        continue;
+      }
+      for (const key of ev[api]) entry[api].add(key);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Badge e limpeza
 // ---------------------------------------------------------------------------
 function updateBadge(tabId) {
@@ -252,6 +304,20 @@ function serializeReport(tab) {
     cookieSummary[c.session ? "session" : "persistent"]++;
   }
 
+  const storage = Object.entries(tab.storage)
+    .map(([origin, e]) => ({
+      origin,
+      thirdParty: e.thirdParty,
+      localStorage: [...e.localStorage],
+      sessionStorage: [...e.sessionStorage],
+      indexedDB: [...e.indexedDB],
+      blocked: [...e.blocked],
+      writes: e.writes,
+      scripts: [...e.scripts]
+    }))
+    .filter((s) => STORAGE_APIS.some((api) => s[api].length) || s.blocked.length)
+    .sort((a, b) => a.thirdParty - b.thirdParty);
+
   return {
     pageUrl: tab.pageUrl,
     pageHost: tab.pageHost,
@@ -260,13 +326,21 @@ function serializeReport(tab) {
     thirdPartyRequests: thirdParty.reduce((s, d) => s + d.count, 0),
     thirdParty,
     cookies,
-    cookieSummary
+    cookieSummary,
+    storage
   };
 }
 
-browser.runtime.onMessage.addListener((msg) => {
-  if (msg && msg.type === "getReport") {
+browser.runtime.onMessage.addListener((msg, sender) => {
+  if (!msg) return;
+
+  if (msg.type === "getReport") {
     const tab = getTab(msg.tabId);
     return Promise.resolve(tab ? serializeReport(tab) : null);
+  }
+
+  if (msg.type === "pageEvent" && sender.tab) {
+    const tab = ensureTab({ tabId: sender.tab.id, documentUrl: sender.tab.url });
+    if (tab) handleStorageEvent(tab, sender.url, msg.event);
   }
 });

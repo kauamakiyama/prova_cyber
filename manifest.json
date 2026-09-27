@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Privacy Guard",
-  "version": "0.2.0",
-  "description": "Detecta conexões a domínios de terceira parte e cookies injetados durante a navegação.",
+  "version": "0.3.0",
+  "description": "Detecta conexões a domínios de terceira parte, cookies injetados e armazenamento HTML5 durante a navegação.",
 
   "browser_specific_settings": {
     "gecko": {
@@ -21,6 +21,17 @@
     "scripts": ["background.js"],
     "persistent": true
   },
+
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["inject.js", "content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+
+  "web_accessible_resources": ["inject.js"],
 
   "browser_action": {
     "default_title": "Privacy Guard",

@@ -76,6 +76,45 @@ function renderCookies(report) {
   }
 }
 
+const STORAGE_APIS = ["localStorage", "sessionStorage", "indexedDB"];
+
+function renderStorage(report) {
+  const tbody = document.querySelector("#storage-summary tbody");
+  tbody.textContent = "";
+  for (const api of STORAGE_APIS) {
+    const count = (third) => report.storage
+      .filter((s) => s.thirdParty === third)
+      .reduce((n, s) => n + s[api].length, 0);
+    const tr = el("tr");
+    tr.append(el("td", "", api), el("td", "", count(false)), el("td", "", count(true)));
+    tbody.append(tr);
+  }
+
+  const list = document.getElementById("storage");
+  list.textContent = "";
+  for (const s of report.storage) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const origin = el("span", "", s.origin);
+    origin.append(el("span", s.thirdParty ? "tag third" : "tag", s.thirdParty ? "3ª" : "1ª"));
+    head.append(origin);
+    li.append(head);
+
+    for (const api of STORAGE_APIS) {
+      if (s[api].length) {
+        li.append(el("div", "details", `${api} (${s[api].length}): ${s[api].join(", ")}`));
+      }
+    }
+    if (s.blocked.length) {
+      li.append(el("div", "details", `acesso bloqueado: ${s.blocked.join(", ")}`));
+    }
+    if (s.scripts.length) {
+      li.append(el("div", "details", `gravado por: ${s.scripts.join(", ")}`));
+    }
+    list.append(li);
+  }
+}
+
 async function init() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   const report = await browser.runtime.sendMessage({ type: "getReport", tabId: tab.id });
@@ -90,6 +129,7 @@ async function init() {
     `${report.pageHost} (site: ${report.pageBaseDomain})`;
   renderThirdParty(report);
   renderCookies(report);
+  renderStorage(report);
 }
 
 init();
