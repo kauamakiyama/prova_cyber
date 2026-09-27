@@ -32,6 +32,19 @@ if (document.documentElement.getAttribute("data-privacy-guard") === token) {
   injectSrc();
 }
 
+// Interação real do usuário no documento principal: permite ao background
+// distinguir navegação por clique de redirect automático por JavaScript
+if (window === window.top) {
+  let gestureSent = false;
+  const onGesture = (event) => {
+    if (!event.isTrusted || gestureSent) return;
+    gestureSent = true;
+    browser.runtime.sendMessage({ type: "userGesture" }).catch(() => {});
+  };
+  window.addEventListener("pointerdown", onGesture, true);
+  window.addEventListener("keydown", onGesture, true);
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data;

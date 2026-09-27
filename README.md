@@ -79,3 +79,38 @@ Detecção feita no contexto da página:
 **Limitações:**
 - Um script que executar antes da injeção (ex.: `<script>` inline no `<head>` de um documento já em cache muito rápido) não é interceptado; o retrato posterior ainda registra as chaves que ele criou.
 - A página pode detectar o hook (ex.: `Storage.prototype.setItem.toString()` não retorna `[native code]`).
+
+### Bounce tracking, parâmetros de rastreamento e cookie sync
+
+**Cadeia de navegação.** O background mantém, por aba, a sequência de páginas pelas quais a navegação passou até a página atual. Uma página é considerada **salto intermediário** quando saiu por:
+
+| Tipo de saída | Como é detectado |
+|---|---|
+| Redirect HTTP (301/302/303/307/308) | `webRequest.onBeforeRedirect` no `main_frame`; a próxima navegação para a URL de destino continua a cadeia |
+| Redirect por JavaScript / meta refresh | a nova navegação tem `originUrl` igual à página anterior, a página anterior ficou aberta por ≤ 5 s **e** não houve interação do usuário nela (`pointerdown`/`keydown` confiáveis, capturados pelo `content.js` no documento principal) |
+
+Para cada salto é registrado como ele saiu (status HTTP ou tempo de permanência) e os dados que tinha no navegador enquanto esteve aberto (nomes de cookies via `Set-Cookie` e chaves de localStorage/sessionStorage/IndexedDB, incluindo as já existentes de visitas anteriores).
+
+**Bounce tracking.** Um salto intermediário é classificado como **bounce** quando seu eTLD+1 é diferente do eTLD+1 do destino final: o usuário "passou" por um site de terceiro, que teve acesso ao próprio storage de 1ª parte (onde pode ler/gravar um ID) sem que o usuário tivesse intenção de visitá-lo. Saltos dentro do mesmo site (ex.: `bad.third-party.site` → `good.third-party.site`) aparecem na cadeia, mas não são bounce.
+
+A página de bounce costuma gravar o ID e redirecionar imediatamente, então a mensagem do content script pode chegar ao background depois que a próxima navegação começou. Eventos vindos do frame principal com host diferente da página atual são atribuídos ao salto correspondente da cadeia, e não ao storage da nova página.
+
+**ID repassado pela URL.** Os valores gravados por cada salto intermediário (valores de `Set-Cookie` e de `setItem`, truncados em 256 caracteres) ficam só em memória no background. Se um parâmetro da URL de destino tiver valor idêntico a um deles, o popup mostra `parâmetro = valor de localStorage:chave gravado por host`. Isso identifica o ID contrabandeado pelo bounce independentemente do nome do parâmetro. Na página de teste do DDG, na primeira visita o ID vai em `isNew`, que não tem nome de identificador.
+
+**Parâmetros na URL.** Os parâmetros da URL da página são classificados em:
+- **rastreamento**: click IDs e marcação de campanha conhecidos (`gclid`, `fbclid`, `msclkid`, `fb_source`, `utm_*`, `_hs*`, `pk_*`, …);
+- **identificador**: nome que sugere ID de usuário (`uid`, `uuid`, `guid`, `user_id`, `visitor_id`, `client_id`, `buyer_uid`…) ou valor com cara de ID (≥ 16 caracteres misturando letras e dígitos, ou número com ≥ 16 dígitos).
+
+**Cookie sync.** Dois indícios, por página:
+
+| Método | Critério |
+|---|---|
+| Valor de cookie na URL | um valor de cookie visto em `Set-Cookie` (com cara de identificador) aparece na URL (crua ou decodificada) de uma requisição a outro eTLD+1 |
+| Redirect entre 3ª partes | subrecurso de um domínio de 3ª parte redirecionado para **outro** domínio de 3ª parte com parâmetro identificador na URL (padrão de pixel de sincronização) |
+
+Valores de cookie são mantidos apenas em memória para essa comparação e não são exibidos. Números com até 15 dígitos (timestamps, cache busters) são ignorados para reduzir falsos positivos.
+
+**Limitações:**
+- O limite de 5 s é heurístico: uma página que redireciona por JavaScript depois de 5 s, ou depois de o usuário interagir com ela, não é tratada como salto.
+- Só são comparados cookies definidos durante o carregamento da página atual; IDs gravados em visitas anteriores ou via `document.cookie` não entram na comparação de valores.
+- Redirects de subrecurso entre 3ª partes **sem** parâmetro identificador não são sinalizados (o ID pode ir em cookie, invisível na URL).

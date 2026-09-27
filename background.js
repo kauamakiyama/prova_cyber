@@ -55,11 +55,17 @@ function isThirdParty(requestHost, pageHost) {
 //   thirdParty: { [baseDomain]: { hosts: Set, count, types: { [type]: n } } },
 //   cookies: { [nome|domínio|path]: { name, domain, path, thirdParty, session, ... } },
 //   storage: { [origem do frame]: { thirdParty, localStorage: Set, sessionStorage: Set,
-//              indexedDB: Set, blocked: Set, writes, scripts: Set } }
+//              indexedDB: Set, blocked: Set, writes, scripts: Set } },
+//   navigation: { chain: [{ url, host, params, exit?, status?, dwell?, cookies?, storage? }] },
+//   pendingRedirect: { to, status } | null,
+//   userGesture: boolean (usuário clicou/teclou no documento principal),
+//   cookieValues: { [valor]: { name, domain } },
+//   pageValues: { [valor]: "cookie:nome" | "localStorage:chave" | ... },
+//   syncs: { [chave]: { method, from, to, params, count } }
 // }
 const tabData = {};
 
-function resetTab(tabId, url) {
+function resetTab(tabId, url, chain) {
   tabData[tabId] = {
     pageUrl: url,
     pageHost: getHostname(url),
@@ -67,7 +73,13 @@ function resetTab(tabId, url) {
     totalRequests: 0,
     thirdParty: {},
     cookies: {},
-    storage: {}
+    storage: {},
+    navigation: { chain: chain || [newHop(url)] },
+    pendingRedirect: null,
+    userGesture: false,
+    cookieValues: {},
+    pageValues: {},
+    syncs: {}
   };
   updateBadge(tabId);
 }
@@ -97,7 +109,7 @@ browser.webRequest.onBeforeRequest.addListener(
 
     // Nova navegação no frame principal: zera o relatório da aba
     if (details.type === "main_frame") {
-      resetTab(details.tabId, details.url);
+      startNavigation(details);
       return;
     }
 
@@ -118,6 +130,7 @@ browser.webRequest.onBeforeRequest.addListener(
     entry.count++;
     entry.types[details.type] = (entry.types[details.type] || 0) + 1;
 
+    checkCookieLeak(tab, details.url, reqHost);
     updateBadge(details.tabId);
   },
   { urls: ["<all_urls>"] }
@@ -135,6 +148,7 @@ function parseSetCookie(line) {
 
   const cookie = {
     name: nameValue.slice(0, eq).trim(),
+    value: nameValue.slice(eq + 1).trim(),
     domain: null,
     path: "/",
     expires: null,
@@ -210,6 +224,13 @@ browser.webRequest.onHeadersReceived.addListener(
           httpOnly: cookie.httpOnly,
           sameSite: cookie.sameSite
         };
+
+        // Valores com cara de identificador ficam só em memória, para detectar
+        // o mesmo valor sendo enviado na URL de outro domínio (cookie sync)
+        if (isIdLikeValue(cookie.value)) {
+          tab.cookieValues[cookie.value] = { name: cookie.name, domain };
+        }
+        if (cookie.value) tab.pageValues[cookie.value] = `cookie:${cookie.name}`;
       }
     }
   },
@@ -253,6 +274,7 @@ function handleStorageEvent(tab, frameUrl, ev) {
 
   if (ev.kind === "storage") {
     if (STORAGE_APIS.includes(ev.api)) entry[ev.api].add(ev.key);
+    if (ev.value) tab.pageValues[ev.value] = `${ev.api}:${ev.key}`;
     entry.writes++;
     if (ev.script) entry.scripts.add(ev.script);
   } else if (ev.kind === "snapshot") {
@@ -266,6 +288,173 @@ function handleStorageEvent(tab, frameUrl, ev) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Navegação: bounce tracking, parâmetros de rastreamento e cookie sync
+// ---------------------------------------------------------------------------
+// Página de outro site que redireciona por JavaScript antes desse tempo é
+// tratada como salto intermediário (bounce). A página de bounce do DDG
+// redireciona imediatamente com location.href.
+const CLIENT_BOUNCE_MS = 5000;
+const MAX_CHAIN = 10;
+
+// Parâmetros de rastreamento conhecidos: click IDs de plataformas de anúncio
+// e marcação de campanha (listas usadas por Firefox, Brave e DuckDuckGo)
+const TRACKING_PARAMS = new Set([
+  "gclid", "dclid", "gbraid", "wbraid", "gclsrc", "_gl",
+  "fbclid", "fb_source", "fb_ref", "fb_action_ids",
+  "msclkid", "yclid", "twclid", "ttclid", "li_fat_id", "igshid",
+  "mc_eid", "mc_cid", "oly_enc_id", "oly_anon_id", "vero_id",
+  "_openstat", "wickedid", "rb_clickid", "s_cid", "ScCid", "epik", "rdt_cid"
+].map((p) => p.toLowerCase()));
+const TRACKING_PARAM_PREFIXES = ["utm_", "_hs", "pk_", "mtm_"];
+
+// Nome de parâmetro que sugere identificador de usuário/dispositivo
+const ID_PARAM_NAME = /uid|uuid|guid|user_?id|visitor_?id|client_?id|device_?id|partner_?id|buyer_?id/i;
+
+function isTrackingParam(name) {
+  const n = name.toLowerCase();
+  return TRACKING_PARAMS.has(n) || TRACKING_PARAM_PREFIXES.some((p) => n.startsWith(p));
+}
+
+// Valor com cara de identificador: letras e dígitos misturados, ou número muito
+// longo. Números curtos, datas e timestamps (10-13 dígitos) ficam de fora.
+function isIdLikeValue(value) {
+  if (!value || value.length < 8 || value.length > 256) return false;
+  if (/^\d+$/.test(value)) return value.length >= 16;
+  return /\d/.test(value) && /[a-z]/i.test(value) && /^[\w.\-~%|:=]+$/.test(value);
+}
+
+function analyzeParams(url) {
+  const result = { tracking: [], ids: [] };
+  let params;
+  try {
+    params = new URL(url).searchParams;
+  } catch (e) {
+    return result;
+  }
+  for (const [name, value] of params) {
+    if (isTrackingParam(name)) result.tracking.push(name);
+    else if (value && (ID_PARAM_NAME.test(name) || (value.length >= 16 && isIdLikeValue(value)))) {
+      result.ids.push(name);
+    }
+  }
+  return result;
+}
+
+function newHop(url) {
+  return { url, host: getHostname(url), params: analyzeParams(url) };
+}
+
+// Chaves de armazenamento gravadas pela página (para registrar no salto de bounce)
+function storageKeys(tab) {
+  const keys = [];
+  for (const entry of Object.values(tab.storage)) {
+    for (const api of STORAGE_APIS) {
+      for (const key of entry[api]) keys.push(`${api}:${key}`);
+    }
+  }
+  return keys;
+}
+
+// Redirect por JavaScript/meta refresh: a nova navegação foi iniciada pela
+// própria página anterior, que ficou aberta por pouco tempo e sem nenhuma
+// interação do usuário (clique/tecla). Se é bounce ou não (outro site) é
+// decidido em navigationReport().
+function isClientRedirect(prev, details, now) {
+  return !prev.userGesture &&
+    now - prev.startedAt <= CLIENT_BOUNCE_MS &&
+    getHostname(details.originUrl) === prev.pageHost;
+}
+
+function startNavigation(details) {
+  const prev = getTab(details.tabId);
+  const now = Date.now();
+  let chain = null;
+  let exit = null;
+
+  if (prev && prev.pendingRedirect && prev.pendingRedirect.to === details.url) {
+    exit = { exit: "server", status: prev.pendingRedirect.status };
+  } else if (prev && isClientRedirect(prev, details, now)) {
+    exit = { exit: "client", dwell: now - prev.startedAt };
+  }
+
+  if (exit) {
+    // Continua a cadeia: registra como a página anterior saiu e o que ela gravou
+    chain = prev.navigation.chain.slice(-(MAX_CHAIN - 1));
+    Object.assign(chain[chain.length - 1], exit, {
+      cookies: Object.values(prev.cookies).map((c) => c.name),
+      storage: storageKeys(prev),
+      values: Object.assign({}, prev.pageValues)
+    });
+    chain.push(newHop(details.url));
+  }
+
+  resetTab(details.tabId, details.url, chain);
+}
+
+// Gravação que chegou depois que a aba já navegou: a página de bounce grava o
+// ID e redireciona na sequência, então a mensagem do content script pode chegar
+// quando a próxima página já começou. Atribui ao salto correspondente da cadeia.
+function handleLateHopEvent(tab, frameUrl, ev) {
+  if (ev.kind !== "storage") return;
+  const hops = tab.navigation.chain.slice(0, -1);
+  const hop = hops.find((h) => h.url === frameUrl) ||
+    hops.find((h) => h.host === getHostname(frameUrl));
+  if (!hop) return;
+
+  const key = `${ev.api}:${ev.key}`;
+  if (!hop.storage.includes(key)) hop.storage.push(key);
+  if (ev.value) hop.values[ev.value] = key;
+}
+
+function addSync(tab, sync) {
+  const key = `${sync.method}|${sync.from}|${sync.to}|${sync.params.join(",")}`;
+  if (tab.syncs[key]) tab.syncs[key].count++;
+  else tab.syncs[key] = Object.assign({ count: 1 }, sync);
+}
+
+// Valor de um cookie de um domínio aparecendo na URL de requisição a outro domínio
+function checkCookieLeak(tab, url, reqHost) {
+  const reqBase = getBaseDomain(reqHost);
+  let decoded = url;
+  try {
+    decoded = decodeURIComponent(url);
+  } catch (e) {}
+
+  for (const [value, c] of Object.entries(tab.cookieValues)) {
+    if (getBaseDomain(c.domain) === reqBase) continue;
+    if (url.includes(value) || decoded.includes(value)) {
+      addSync(tab, { method: "cookie", from: c.domain, to: reqHost, params: [c.name] });
+    }
+  }
+}
+
+browser.webRequest.onBeforeRedirect.addListener(
+  (details) => {
+    if (details.tabId < 0) return;
+    const tab = getTab(details.tabId);
+    if (!tab) return;
+
+    // Redirect HTTP da navegação principal: a próxima main_frame continua a cadeia
+    if (details.type === "main_frame") {
+      tab.pendingRedirect = { to: details.redirectUrl, status: details.statusCode };
+      return;
+    }
+
+    // Subrecurso redirecionado de um domínio de 3ª parte para outro levando
+    // um identificador na URL: padrão de pixel de sincronização de cookies
+    const fromHost = getHostname(details.url);
+    const toHost = getHostname(details.redirectUrl);
+    if (!fromHost || !toHost) return;
+    if (!isThirdParty(fromHost, tab.pageHost) || !isThirdParty(toHost, tab.pageHost)) return;
+    if (!isThirdParty(fromHost, toHost)) return;
+
+    const { ids } = analyzeParams(details.redirectUrl);
+    if (ids.length) addSync(tab, { method: "redirect", from: fromHost, to: toHost, params: ids });
+  },
+  { urls: ["<all_urls>"] }
+);
 
 // ---------------------------------------------------------------------------
 // Badge e limpeza
@@ -286,6 +475,34 @@ browser.tabs.onRemoved.addListener((tabId) => {
 // ---------------------------------------------------------------------------
 // Comunicação com o popup
 // ---------------------------------------------------------------------------
+// Saltos intermediários de outro eTLD+1 que o destino final = bounce tracking.
+// "passed": parâmetro da URL final cujo valor é igual a um cookie/storage
+// gravado por um salto intermediário, ou seja, o ID foi repassado pela URL.
+function navigationReport(tab) {
+  const fullChain = tab.navigation.chain;
+  const final = fullChain[fullChain.length - 1];
+  const finalBase = getBaseDomain(final.host);
+
+  const passed = [];
+  let params = [];
+  try {
+    params = new URL(final.url).searchParams;
+  } catch (e) {}
+  for (const [name, value] of params) {
+    if (value.length < 2) continue;
+    const hop = fullChain.slice(0, -1).find((h) => h.values && h.values[value]);
+    if (hop) passed.push({ param: name, host: hop.host, source: hop.values[value] });
+  }
+
+  // Os valores gravados ficam só no background, não vão para o popup
+  const chain = fullChain.map(({ values, ...hop }) => hop);
+  return {
+    chain,
+    bounces: chain.slice(0, -1).filter((hop) => getBaseDomain(hop.host) !== finalBase),
+    passed
+  };
+}
+
 function serializeReport(tab) {
   const thirdParty = Object.entries(tab.thirdParty)
     .map(([domain, e]) => ({
@@ -328,7 +545,9 @@ function serializeReport(tab) {
     thirdParty,
     cookies,
     cookieSummary,
-    storage
+    storage,
+    navigation: navigationReport(tab),
+    syncs: Object.values(tab.syncs)
   };
 }
 
@@ -340,8 +559,20 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     return Promise.resolve(tab ? serializeReport(tab) : null);
   }
 
+  if (msg.type === "userGesture" && sender.tab) {
+    const tab = getTab(sender.tab.id);
+    if (tab && getHostname(sender.url) === tab.pageHost) tab.userGesture = true;
+    return;
+  }
+
   if (msg.type === "pageEvent" && sender.tab) {
     const tab = ensureTab({ tabId: sender.tab.id, documentUrl: sender.tab.url });
-    if (tab) handleStorageEvent(tab, sender.url, msg.event);
+    if (!tab) return;
+    // Evento do frame principal de outro host = página anterior (ver handleLateHopEvent)
+    if (sender.frameId === 0 && getHostname(sender.url) !== tab.pageHost) {
+      handleLateHopEvent(tab, sender.url, msg.event);
+    } else {
+      handleStorageEvent(tab, sender.url, msg.event);
+    }
   }
 });

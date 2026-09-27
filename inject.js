@@ -49,6 +49,8 @@ function privacyGuardPageHook(token) {
         op: "setItem",
         key: String(key),
         size: String(value).length,
+        // Valor (truncado) só para o background comparar com parâmetros de URL
+        value: String(value).slice(0, 256),
         script: callerScript()
       });
     } catch (e) {}
