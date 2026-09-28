@@ -147,3 +147,35 @@ Extrações que não atendem ao critério aparecem como **leitura** (sem alerta)
 - Fingerprint só por `measureText` (medição de fontes) ou por WebGL sem extração de pixels (ex.: `getParameter` de `UNMASKED_RENDERER`) não é detectado.
 - Scripts podem detectar os hooks e mudar de comportamento.
 - Acesso a iframes por `window.frames[i]` / `window[i]` (sem passar por `contentWindow`) não instala os hooks na janela do iframe.
+
+### Indicadores de hijacking e hook
+
+Um script injetado na página (por XSS, por um terceiro comprometido ou por um framework como o BeEF) costuma deixar dois tipos de rastro: **um canal persistente com um servidor de terceiros**, por onde recebe comandos e envia dados, e **alterações no ambiente JavaScript da página** para interceptar tráfego e eventos.
+
+**Na rede (`background.js`):**
+
+| Indicador | Critério |
+|---|---|
+| WebSocket para 3ª parte | requisição `webRequest` do tipo `websocket` para eTLD+1 diferente da página |
+| Polling persistente para 3ª parte | o mesmo endpoint de 3ª parte (host + caminho, sem query; tipos `xmlhttprequest`, `beacon`, `ping`, `image`, `script`, `other`) chamado em **≥ 4 rodadas** ao longo de **≥ 20 s**. Requisições a menos de 2 s umas das outras contam como a mesma rodada: um leilão de anúncios dispara várias de uma vez, e o que caracteriza o canal persistente é a rodada se repetir. O popup mostra o intervalo típico (mediana) entre rodadas |
+
+**No contexto da página (`inject.js`, só no documento principal):** no `document_start`, antes de qualquer script do site (e depois dos hooks da própria extensão), são guardados:
+- o conjunto de propriedades próprias de `window` (`Object.getOwnPropertyNames`);
+- as referências de funções nativas usadas para interceptar tráfego, eventos e DOM: `fetch`, `XMLHttpRequest` (+ `open`, `send`, `setRequestHeader`), `WebSocket`, `EventSource`, `navigator.sendBeacon`, `EventTarget.addEventListener`, `document.write`, `document.createElement`, `Node.appendChild`/`insertBefore`, `history.pushState`/`replaceState`, `window.open`, `eval`, `setTimeout`/`setInterval`, `postMessage`, `Function.prototype.toString`, `JSON.stringify`/`parse`.
+
+O diff é feito 3 s, 10 s e 30 s após o `DOMContentLoaded` (não o `load`, que em portais com muitos anúncios demora demais), depois a cada 60 s e **sempre que o popup é aberto**: o background pede ao `content.js` do documento principal uma verificação imediata e espera 300 ms pela resposta antes de montar o relatório.
+
+| Indicador | Critério |
+|---|---|
+| Função nativa sobrescrita | a referência atual difere da guardada no início. Quando a função substituta tem a marca que a biblioteca deixa apontando para a original, o autor provável é indicado: `__sentry_original__` (Sentry), `__zone_symbol__OriginalDelegate` (zone.js/Angular), `__rrweb_original__` (rrweb, session replay) |
+| Global adicionada | propriedade nova em `window` que não é função nativa do navegador (APIs resolvidas sob demanda são ignoradas) nem índice numérico (`window[0]`… são os iframes da página); globais de bibliotecas conhecidas são identificadas (`dataLayer` = Google Tag Manager, `fbq` = Meta Pixel, `pbjs` = Prebid.js, `hj` = Hotjar…) |
+| Assinatura do BeEF | global `beef` / `BeefJS` / `beef_init` ou `<script src=".../hook.js">` |
+
+A extensão usa cópias de `postMessage` e `Function.prototype.toString` guardadas no início, de modo que um script que as sobrescreva não consegue silenciar o relatório.
+
+**Pegada da própria extensão:** a extensão não substitui construtores globais (`WebSocket`, `fetch`…) justamente para não alterar o ambiente que ela mesma avalia. Os hooks de storage e canvas alteram métodos de protótipos (`Storage.prototype.setItem`, `IDBFactory.prototype.open`, `HTMLCanvasElement.prototype.toDataURL`…), o que é visível para uma página que inspecione esses métodos (ex.: página js-leaks do DDG).
+
+**Limitações:**
+- Globais adicionadas são comuns em sites legítimos (bibliotecas, analytics); o número sozinho não indica ataque. O que pesa são funções nativas sobrescritas, canais persistentes com terceiros e assinaturas conhecidas.
+- Polling com intervalo maior que o período observado, ou que muda de caminho a cada chamada, não é agrupado.
+- Uma função nativa sobrescrita e depois restaurada entre duas verificações não é detectada.
