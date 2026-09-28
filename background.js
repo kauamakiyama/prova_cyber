@@ -61,7 +61,8 @@ function isThirdParty(requestHost, pageHost) {
 //   userGesture: boolean (usuário clicou/teclou no documento principal),
 //   cookieValues: { [valor]: { name, domain } },
 //   pageValues: { [valor]: "cookie:nome" | "localStorage:chave" | ... },
-//   syncs: { [chave]: { method, from, to, params, count } }
+//   syncs: { [chave]: { method, from, to, params, count } },
+//   canvas: { [método|script|fingerprint|webgl]: { method, script, fingerprint, ... } }
 // }
 const tabData = {};
 
@@ -79,7 +80,8 @@ function resetTab(tabId, url, chain) {
     userGesture: false,
     cookieValues: {},
     pageValues: {},
-    syncs: {}
+    syncs: {},
+    canvas: {}
   };
   updateBadge(tabId);
 }
@@ -290,6 +292,36 @@ function handleStorageEvent(tab, frameUrl, ev) {
 }
 
 // ---------------------------------------------------------------------------
+// Canvas fingerprint (eventos enviados pelo inject.js)
+// ---------------------------------------------------------------------------
+// A classificação (fingerprint ou simples leitura) é feita no inject.js, que vê
+// o que foi desenhado no canvas. Aqui só se agrega e se marca 1ª/3ª parte pelo
+// script que extraiu a imagem (ou pelo frame, se a pilha não tiver URL).
+function handleCanvasEvent(tab, frameUrl, ev) {
+  const key = `${ev.method}|${ev.script}|${ev.fingerprint}|${ev.webgl}`;
+  if (tab.canvas[key]) {
+    tab.canvas[key].count++; // outro canvas extraído pelo mesmo script/método
+    return;
+  }
+
+  const scriptHost = getHostname(ev.script);
+  tab.canvas[key] = {
+    count: 1,
+    method: ev.method,
+    script: ev.script,
+    frame: getHostname(frameUrl),
+    thirdParty: isThirdParty(scriptHost || getHostname(frameUrl), tab.pageHost),
+    width: ev.width,
+    height: ev.height,
+    format: ev.format,
+    chars: ev.chars,
+    colors: ev.colors,
+    webgl: ev.webgl,
+    fingerprint: ev.fingerprint
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Navegação: bounce tracking, parâmetros de rastreamento e cookie sync
 // ---------------------------------------------------------------------------
 // Página de outro site que redireciona por JavaScript antes desse tempo é
@@ -380,14 +412,20 @@ function startNavigation(details) {
   }
 
   if (exit) {
-    // Continua a cadeia: registra como a página anterior saiu e o que ela gravou
     chain = prev.navigation.chain.slice(-(MAX_CHAIN - 1));
-    Object.assign(chain[chain.length - 1], exit, {
-      cookies: Object.values(prev.cookies).map((c) => c.name),
-      storage: storageKeys(prev),
-      values: Object.assign({}, prev.pageValues)
-    });
-    chain.push(newHop(details.url));
+    if (getHostname(details.url) === prev.pageHost) {
+      // Mesmo host (ex.: upgrade interno http -> https do Firefox, status 0,
+      // ou normalização de caminho): não é um salto, só atualiza a URL
+      chain[chain.length - 1] = newHop(details.url);
+    } else {
+      // Continua a cadeia: registra como a página anterior saiu e o que ela gravou
+      Object.assign(chain[chain.length - 1], exit, {
+        cookies: Object.values(prev.cookies).map((c) => c.name),
+        storage: storageKeys(prev),
+        values: Object.assign({}, prev.pageValues)
+      });
+      chain.push(newHop(details.url));
+    }
   }
 
   resetTab(details.tabId, details.url, chain);
@@ -547,7 +585,8 @@ function serializeReport(tab) {
     cookieSummary,
     storage,
     navigation: navigationReport(tab),
-    syncs: Object.values(tab.syncs)
+    syncs: Object.values(tab.syncs),
+    canvas: Object.values(tab.canvas).sort((a, b) => b.fingerprint - a.fingerprint)
   };
 }
 
@@ -571,6 +610,8 @@ browser.runtime.onMessage.addListener((msg, sender) => {
     // Evento do frame principal de outro host = página anterior (ver handleLateHopEvent)
     if (sender.frameId === 0 && getHostname(sender.url) !== tab.pageHost) {
       handleLateHopEvent(tab, sender.url, msg.event);
+    } else if (msg.event.kind === "canvas") {
+      handleCanvasEvent(tab, sender.url, msg.event);
     } else {
       handleStorageEvent(tab, sender.url, msg.event);
     }

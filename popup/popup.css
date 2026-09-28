@@ -23,7 +23,7 @@ li {
 .count { color: #c0392b; }
 .details { color: #666; font-size: 11px; word-break: break-all; }
 
-#third-party, #cookies, #storage, #navigation { max-height: 220px; }
+#third-party, #cookies, #storage, #navigation, #canvas { max-height: 220px; }
 
 table { width: 100%; border-collapse: collapse; margin-bottom: 6px; }
 th, td { padding: 4px 6px; text-align: center; border: 1px solid #eee; }

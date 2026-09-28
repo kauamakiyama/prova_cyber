@@ -89,6 +89,8 @@ Detecção feita no contexto da página:
 | Redirect HTTP (301/302/303/307/308) | `webRequest.onBeforeRedirect` no `main_frame`; a próxima navegação para a URL de destino continua a cadeia |
 | Redirect por JavaScript / meta refresh | a nova navegação tem `originUrl` igual à página anterior, a página anterior ficou aberta por ≤ 5 s **e** não houve interação do usuário nela (`pointerdown`/`keydown` confiáveis, capturados pelo `content.js` no documento principal) |
 
+Redirects para o **mesmo host** (ex.: upgrade interno `http` → `https` do Firefox, que chega ao `onBeforeRedirect` com status 0) não viram salto: apenas atualizam a URL da página.
+
 Para cada salto é registrado como ele saiu (status HTTP ou tempo de permanência) e os dados que tinha no navegador enquanto esteve aberto (nomes de cookies via `Set-Cookie` e chaves de localStorage/sessionStorage/IndexedDB, incluindo as já existentes de visitas anteriores).
 
 **Bounce tracking.** Um salto intermediário é classificado como **bounce** quando seu eTLD+1 é diferente do eTLD+1 do destino final: o usuário "passou" por um site de terceiro, que teve acesso ao próprio storage de 1ª parte (onde pode ler/gravar um ID) sem que o usuário tivesse intenção de visitá-lo. Saltos dentro do mesmo site (ex.: `bad.third-party.site` → `good.third-party.site`) aparecem na cadeia, mas não são bounce.
@@ -114,3 +116,34 @@ Valores de cookie são mantidos apenas em memória para essa comparação e não
 - O limite de 5 s é heurístico: uma página que redireciona por JavaScript depois de 5 s, ou depois de o usuário interagir com ela, não é tratada como salto.
 - Só são comparados cookies definidos durante o carregamento da página atual; IDs gravados em visitas anteriores ou via `document.cookie` não entram na comparação de valores.
 - Redirects de subrecurso entre 3ª partes **sem** parâmetro identificador não são sinalizados (o ID pode ir em cookie, invisível na URL).
+
+### Canvas fingerprint
+
+Canvas fingerprinting desenha texto e formas num `<canvas>` e lê os pixels resultantes: pequenas diferenças de fontes, antialiasing, GPU e driver fazem a imagem (e seu hash) variar entre dispositivos, mas se manter estável no mesmo dispositivo, sem precisar de cookies.
+
+O `inject.js` acompanha, por canvas, o que foi desenhado e classifica cada extração da imagem:
+
+| Hook | Função |
+|---|---|
+| `fillText` / `strokeText` (2D e OffscreenCanvas) | registra caracteres distintos e cores (`fillStyle`/`strokeStyle`) usadas no texto |
+| `drawImage` + `OffscreenCanvas.transferToImageBitmap` | propaga o que foi desenhado de um canvas/bitmap para o canvas de destino |
+| `getContext("webgl"/"webgl2")` | marca o canvas como WebGL |
+| `toDataURL`, `toBlob`, `getImageData`, `OffscreenCanvas.convertToBlob`, `WebGL…readPixels` | **extração**: classifica e reporta |
+| getters `contentWindow` / `contentDocument` de `HTMLIFrameElement`/`HTMLFrameElement` | instala todos os hooks na janela do iframe antes de devolvê-la à página |
+
+**Canvas criado dentro de iframe.** Cada janela tem seus próprios protótipos; um canvas criado com `iframe.contentDocument.createElement("canvas")` usa o `HTMLCanvasElement.prototype` do iframe, que não passou pelos hooks da página. Scripts de fingerprint usam essa técnica para escapar de extensões (o BrowserLeaks faz exatamente isso). Por isso, quando a página acessa a janela ou o documento de um iframe da mesma origem, os hooks de storage, canvas e frames são instalados nela na hora. Iframes de outra origem não são acessíveis pela página e são cobertos pelo content script do próprio iframe.
+
+**Critério** (adaptado de Englehardt & Narayanan, *Online Tracking: A 1-million-site Measurement and Analysis*, ACM CCS 2016). Uma extração é **fingerprint** quando:
+1. a área extraída tem pelo menos **16×16 px**; e
+2. o canvas contém texto com **≥ 10 caracteres distintos** ou **≥ 2 cores**, e a extração **não** usa formato com perda (`image/jpeg`, `image/webp`); **ou** o canvas é **WebGL** (a renderização depende de GPU/driver).
+
+Extrações que não atendem ao critério aparecem como **leitura** (sem alerta): editores de imagem, compressão de fotos antes de upload, jogos.
+
+- Cada canvas é reportado uma vez por método de extração (evita inundar o background com `getImageData` em loop de animação); o popup soma quantos canvases cada script extraiu.
+- A classificação 1ª/3ª parte usa o domínio do **script** que extraiu a imagem (pilha de chamadas); se não houver URL na pilha, usa o frame.
+
+**Limitações:**
+- O critério original também exclui scripts que chamam `save`/`restore`/`addEventListener` no canvas (animações). Essa exclusão não foi implementada.
+- Fingerprint só por `measureText` (medição de fontes) ou por WebGL sem extração de pixels (ex.: `getParameter` de `UNMASKED_RENDERER`) não é detectado.
+- Scripts podem detectar os hooks e mudar de comportamento.
+- Acesso a iframes por `window.frames[i]` / `window[i]` (sem passar por `contentWindow`) não instala os hooks na janela do iframe.

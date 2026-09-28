@@ -192,6 +192,45 @@ function renderNavigation(report) {
   }
 }
 
+function hostOf(url) {
+  try {
+    return new URL(url).hostname;
+  } catch (e) {
+    return null;
+  }
+}
+
+function renderCanvas(report) {
+  const fp = report.canvas.filter((c) => c.fingerprint);
+  const reads = report.canvas.filter((c) => !c.fingerprint);
+  const total = (list) => list.reduce((n, c) => n + c.count, 0);
+  document.getElementById("canvas-summary").textContent =
+    `${total(fp)} tentativa(s) de fingerprint · ${total(reads)} leitura(s) de canvas`;
+
+  const list = document.getElementById("canvas");
+  list.textContent = "";
+  for (const c of report.canvas) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const who = el("span", "", hostOf(c.script) || c.frame);
+    who.append(
+      el("span", c.thirdParty ? "tag third" : "tag", c.thirdParty ? "3ª" : "1ª"),
+      el("span", c.fingerprint ? "tag third" : "tag", c.fingerprint ? "fingerprint" : "leitura")
+    );
+    head.append(who, el("span", "count", c.count));
+
+    const drawing = `desenho: ${c.chars} caractere(s) distinto(s), ${c.colors} cor(es)` +
+      (c.webgl ? " · WebGL" : "");
+    li.append(
+      head,
+      el("div", "details", `${c.method} · ${c.width}×${c.height} · ${c.format}`),
+      el("div", "details", drawing)
+    );
+    if (c.script) li.append(el("div", "details", c.script));
+    list.append(li);
+  }
+}
+
 async function init() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   const report = await browser.runtime.sendMessage({ type: "getReport", tabId: tab.id });
@@ -208,6 +247,7 @@ async function init() {
   renderCookies(report);
   renderStorage(report);
   renderNavigation(report);
+  renderCanvas(report);
 }
 
 init();
