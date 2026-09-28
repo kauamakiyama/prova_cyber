@@ -231,6 +231,79 @@ function renderCanvas(report) {
   }
 }
 
+function renderHijack(report) {
+  const { sockets, polling, globals } = report.hijack;
+  const natives = globals ? globals.natives : [];
+  document.getElementById("hijack-summary").textContent =
+    `${sockets.length} WebSocket(s) de 3ª parte · ` +
+    `${polling.length} polling(s) persistente(s) · ` +
+    `${natives.length} função(ões) nativa(s) sobrescrita(s) · ` +
+    `${globals ? globals.addedCount : 0} global(is) adicionada(s)` +
+    (globals ? "" : " (verificação após o load)");
+
+  const list = document.getElementById("hijack");
+  list.textContent = "";
+
+  if (globals && globals.beef) {
+    const li = el("li");
+    li.append(el("div", "alert", "Assinatura do BeEF (Browser Exploitation Framework) detectada"));
+    if (globals.beefScripts.length) li.append(el("div", "details", globals.beefScripts.join(", ")));
+    list.append(li);
+  }
+
+  for (const s of sockets) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const name = el("span", "", s.host);
+    name.append(el("span", "tag third", "WebSocket 3ª"));
+    head.append(name, el("span", "count", s.count));
+    li.append(head, el("div", "details", s.urls.join(", ")));
+    list.append(li);
+  }
+
+  for (const p of polling) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const name = el("span", "", p.host);
+    name.append(el("span", "tag third", "polling 3ª"));
+    head.append(name, el("span", "count", p.count));
+    li.append(
+      head,
+      el("div", "details", p.path),
+      el("div", "details",
+        `${p.count} requisições em ${p.rounds} rodadas ao longo de ${p.spanSeconds} s · ` +
+        `a cada ~${p.intervalSeconds} s`)
+    );
+    list.append(li);
+  }
+
+  if (natives.length) {
+    const li = el("li");
+    li.append(el("div", "domain", "Funções nativas sobrescritas"));
+    const tags = el("div", "details");
+    for (const n of natives) tags.append(el("span", "tag third", n.by ? `${n.name} (${n.by})` : n.name));
+    li.append(tags, el("div", "details", "um script substituiu a função original do navegador (pode interceptar tráfego/eventos); entre parênteses, o provável autor"));
+    list.append(li);
+  }
+
+  if (globals && globals.addedCount) {
+    const li = el("li");
+    li.append(el("div", "domain", `Globais adicionadas pela página (${globals.addedCount})`));
+    for (const k of globals.known) {
+      const line = el("div", "details");
+      line.append(el("span", "tag persistent", k.name), ` ${k.label}`);
+      li.append(line);
+    }
+    const known = new Set(globals.known.map((k) => k.name));
+    const others = globals.added.filter((n) => !known.has(n));
+    if (others.length) {
+      const more = globals.addedCount - globals.added.length;
+      li.append(el("div", "details", others.join(", ") + (more > 0 ? ` … (+${more})` : "")));
+    }
+    list.append(li);
+  }
+}
+
 async function init() {
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
   const report = await browser.runtime.sendMessage({ type: "getReport", tabId: tab.id });
@@ -248,6 +321,7 @@ async function init() {
   renderStorage(report);
   renderNavigation(report);
   renderCanvas(report);
+  renderHijack(report);
 }
 
 init();

@@ -12,9 +12,14 @@ function privacyGuardPageHook(token) {
   // Marca a instalação para o content.js confirmar que o inline não foi bloqueado
   document.documentElement.setAttribute("data-privacy-guard", token);
 
+  // Referências guardadas antes dos scripts da página: um script que sobrescreva
+  // window.postMessage ou Function.prototype.toString não afeta a extensão
+  const nativePostMessage = window.postMessage.bind(window);
+  const nativeToString = Function.prototype.toString;
+
   function post(data) {
     data.__privacyGuard = token;
-    window.postMessage(data, "*");
+    nativePostMessage(data, "*");
   }
 
   // URL do script que chamou a API: pula os frames do próprio hook na pilha
@@ -308,6 +313,166 @@ function privacyGuardPageHook(token) {
   }
 
   installHooks(window);
+
+  // -------------------------------------------------------------------------
+  // Hijacking / hook: globais adicionadas e funções nativas sobrescritas
+  // -------------------------------------------------------------------------
+  // Só no documento principal. O retrato inicial é tirado aqui, em
+  // document_start, depois dos hooks da própria extensão e antes de qualquer
+  // script da página.
+  if (window !== window.top) return;
+
+  // Funções usadas para interceptar tráfego, eventos e DOM. Um script que as
+  // substitui consegue ler ou alterar tudo que a página envia e recebe.
+  const CRITICAL_NATIVES = [
+    ["window", "fetch"], ["window", "XMLHttpRequest"], ["window", "WebSocket"],
+    ["window", "EventSource"], ["window", "open"], ["window", "eval"],
+    ["window", "setTimeout"], ["window", "setInterval"], ["window", "postMessage"],
+    ["XMLHttpRequest.prototype", "open"], ["XMLHttpRequest.prototype", "send"],
+    ["XMLHttpRequest.prototype", "setRequestHeader"],
+    ["Navigator.prototype", "sendBeacon"],
+    ["EventTarget.prototype", "addEventListener"],
+    ["Document.prototype", "write"], ["Document.prototype", "createElement"],
+    ["Node.prototype", "appendChild"], ["Node.prototype", "insertBefore"],
+    ["History.prototype", "pushState"], ["History.prototype", "replaceState"],
+    ["Function.prototype", "toString"], ["JSON", "stringify"], ["JSON", "parse"]
+  ];
+
+  // Globais de bibliotecas de rastreamento/hook conhecidas
+  const KNOWN_GLOBALS = {
+    beef: "BeEF (Browser Exploitation Framework)",
+    BeefJS: "BeEF (Browser Exploitation Framework)",
+    beef_init: "BeEF (Browser Exploitation Framework)",
+    dataLayer: "Google Tag Manager",
+    google_tag_manager: "Google Tag Manager",
+    gtag: "Google Analytics (gtag.js)",
+    ga: "Google Analytics (analytics.js)",
+    googletag: "Google Publisher Tag (anúncios)",
+    fbq: "Meta Pixel",
+    _fbq: "Meta Pixel",
+    ttq: "TikTok Pixel",
+    _hsq: "HubSpot",
+    hj: "Hotjar (session replay)",
+    clarity: "Microsoft Clarity (session replay)",
+    FS: "FullStory (session replay)",
+    _satellite: "Adobe Experience Platform",
+    pbjs: "Prebid.js (header bidding)",
+    apstag: "Amazon Publisher Services",
+    Criteo: "Criteo",
+    uetq: "Microsoft Advertising (UET)",
+    _linkedin_partner_id: "LinkedIn Insight Tag",
+    ym: "Yandex Metrica",
+    _paq: "Matomo",
+    mixpanel: "Mixpanel",
+    amplitude: "Amplitude",
+    OneSignal: "OneSignal (push)",
+    _gaq: "Google Analytics (ga.js, legado)",
+    gptadslots: "Google Publisher Tag (anúncios)",
+    adsbygoogle: "Google AdSense",
+    utag: "Tealium iQ (tag manager)",
+    utag_data: "Tealium iQ (tag manager)",
+    _comscore: "comScore",
+    COMSCORE: "comScore",
+    permutive: "Permutive (segmentação de audiência)",
+    __tcfapi: "CMP / IAB TCF (consentimento)",
+    OneTrust: "OneTrust (consentimento)",
+    __SENTRY__: "Sentry (monitoramento de erros)",
+    NREUM: "New Relic (monitoramento)",
+    newrelic: "New Relic (monitoramento)"
+  };
+
+  // Marcas que bibliotecas conhecidas deixam na função que substituem
+  // (referência para a original): permitem apontar o provável autor
+  const WRAPPER_MARKERS = {
+    __sentry_original__: "Sentry",
+    __zone_symbol__OriginalDelegate: "zone.js (Angular)",
+    __rrweb_original__: "rrweb (session replay)"
+  };
+
+  function wrapperAuthor(fn) {
+    for (const [marker, name] of Object.entries(WRAPPER_MARKERS)) {
+      try {
+        if (fn && fn[marker]) return name;
+      } catch (e) {}
+    }
+    return null;
+  }
+  const BEEF_GLOBALS = ["beef", "BeefJS", "beef_init"];
+
+  function resolvePath(path) {
+    return path.split(".").reduce((obj, key) => (key === "window" ? window : obj[key]), window);
+  }
+
+  const nativeRefs = new Map();
+  for (const [path, prop] of CRITICAL_NATIVES) {
+    try {
+      nativeRefs.set(`${path}.${prop}`.replace(/^window\./, ""), [path, prop, resolvePath(path)[prop]]);
+    } catch (e) {}
+  }
+
+  const baselineGlobals = new Set(Object.getOwnPropertyNames(window));
+
+  // Funções nativas que aparecem depois (APIs resolvidas sob demanda pelo
+  // navegador) não são adições da página
+  function isNativeFunction(value) {
+    try {
+      return typeof value === "function" && /\[native code\]\s*\}$/.test(nativeToString.call(value));
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function checkGlobals() {
+    const added = [];
+    for (const name of Object.getOwnPropertyNames(window)) {
+      if (baselineGlobals.has(name) || name === "privacyGuardPageHook") continue;
+      if (/^\d+$/.test(name)) continue; // window[0], window[1]…: iframes da página, não globais
+      let value;
+      try {
+        value = window[name];
+      } catch (e) {}
+      if (isNativeFunction(value)) continue;
+      added.push(name);
+    }
+
+    const natives = [];
+    for (const [key, [path, prop, original]] of nativeRefs) {
+      try {
+        const current = resolvePath(path)[prop];
+        if (current !== original) natives.push({ name: key, by: wrapperAuthor(current) });
+      } catch (e) {}
+    }
+
+    const beefScripts = Array.from(document.scripts)
+      .map((s) => s.src)
+      .filter((src) => /\/hook\.js(\?|#|$)/i.test(src));
+
+    post({
+      kind: "globals",
+      addedCount: added.length,
+      added: added.slice(0, 80),
+      known: added.filter((n) => KNOWN_GLOBALS[n]).map((n) => ({ name: n, label: KNOWN_GLOBALS[n] })),
+      natives,
+      beef: added.some((n) => BEEF_GLOBALS.includes(n)) || beefScripts.length > 0,
+      beefScripts
+    });
+  }
+
+  // Reverifica ao longo do tempo: scripts injetados tardiamente (ou após um
+  // clique, como no teste js-leaks do DDG) também são pegos. Começa no
+  // DOMContentLoaded: em portais com muitos anúncios o load demora demais.
+  document.addEventListener("DOMContentLoaded", () => {
+    for (const delay of [3000, 10000, 30000]) setTimeout(checkGlobals, delay);
+    setTimeout(() => setInterval(checkGlobals, 60000), 30000);
+  });
+
+  // Verificação sob demanda: o popup pede um retrato atualizado ao abrir
+  window.addEventListener("message", (event) => {
+    if (event.source !== window || !event.data) return;
+    if (event.data.__privacyGuardCmd === token && event.data.cmd === "checkGlobals") {
+      checkGlobals();
+    }
+  });
 }
 
 // Modo fallback (<script src>): o token vem no atributo data do próprio script.

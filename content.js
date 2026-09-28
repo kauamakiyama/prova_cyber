@@ -45,6 +45,15 @@ if (window === window.top) {
   window.addEventListener("keydown", onGesture, true);
 }
 
+// Pedido do background (popup aberto): repassa ao hook da página
+if (window === window.top) {
+  browser.runtime.onMessage.addListener((msg) => {
+    if (msg && msg.type === "checkGlobals") {
+      window.postMessage({ __privacyGuardCmd: token, cmd: "checkGlobals" }, "*");
+    }
+  });
+}
+
 window.addEventListener("message", (event) => {
   if (event.source !== window) return;
   const data = event.data;

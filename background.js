@@ -62,7 +62,10 @@ function isThirdParty(requestHost, pageHost) {
 //   cookieValues: { [valor]: { name, domain } },
 //   pageValues: { [valor]: "cookie:nome" | "localStorage:chave" | ... },
 //   syncs: { [chave]: { method, from, to, params, count } },
-//   canvas: { [método|script|fingerprint|webgl]: { method, script, fingerprint, ... } }
+//   canvas: { [método|script|fingerprint|webgl]: { method, script, fingerprint, ... } },
+//   sockets: { [host]: { count, urls: Set } },
+//   endpoints: { [host+path]: { host, path, times: [ms] } },
+//   globals: último relatório de globais/funções nativas do inject.js | null
 // }
 const tabData = {};
 
@@ -81,7 +84,10 @@ function resetTab(tabId, url, chain) {
     cookieValues: {},
     pageValues: {},
     syncs: {},
-    canvas: {}
+    canvas: {},
+    sockets: {},
+    endpoints: {},
+    globals: null
   };
   updateBadge(tabId);
 }
@@ -133,6 +139,7 @@ browser.webRequest.onBeforeRequest.addListener(
     entry.types[details.type] = (entry.types[details.type] || 0) + 1;
 
     checkCookieLeak(tab, details.url, reqHost);
+    trackPersistentChannel(tab, details);
     updateBadge(details.tabId);
   },
   { urls: ["<all_urls>"] }
@@ -319,6 +326,72 @@ function handleCanvasEvent(tab, frameUrl, ev) {
     webgl: ev.webgl,
     fingerprint: ev.fingerprint
   };
+}
+
+// ---------------------------------------------------------------------------
+// Hijacking / hook: canais persistentes com 3ª parte
+// ---------------------------------------------------------------------------
+// Polling: o mesmo endpoint de 3ª parte chamado repetidamente, espalhado no
+// tempo. Um canal assim permite a um terceiro receber dados continuamente e
+// devolver comandos para a página (é como o hook do BeEF se comunica).
+const POLLING_MIN_REQUESTS = 4;
+const POLLING_MIN_SPAN_MS = 20000;
+const POLLING_TYPES = new Set(["xmlhttprequest", "beacon", "ping", "image", "script", "other"]);
+const MAX_TIMES = 60;
+
+function trackPersistentChannel(tab, details) {
+  const host = getHostname(details.url);
+
+  if (details.type === "websocket") {
+    let entry = tab.sockets[host];
+    if (!entry) entry = tab.sockets[host] = { count: 0, urls: new Set() };
+    entry.count++;
+    entry.urls.add(details.url.split("?")[0]);
+    return;
+  }
+
+  if (!POLLING_TYPES.has(details.type)) return;
+  let path;
+  try {
+    path = new URL(details.url).pathname;
+  } catch (e) {
+    return;
+  }
+  const key = host + path;
+  let entry = tab.endpoints[key];
+  if (!entry) entry = tab.endpoints[key] = { host, path, times: [] };
+  entry.times.push(Date.now());
+  if (entry.times.length > MAX_TIMES) entry.times.shift();
+}
+
+// Requisições a menos de 2 s umas das outras formam uma "rodada" (ex.: um leilão
+// de anúncios dispara várias de uma vez). Polling = rodadas que se repetem.
+const ROUND_GAP_MS = 2000;
+
+function pollingReport(tab) {
+  const result = [];
+  for (const e of Object.values(tab.endpoints)) {
+    const n = e.times.length;
+    const span = n ? e.times[n - 1] - e.times[0] : 0;
+    if (n < POLLING_MIN_REQUESTS || span < POLLING_MIN_SPAN_MS) continue;
+
+    const rounds = [e.times[0]];
+    for (let i = 1; i < n; i++) {
+      if (e.times[i] - e.times[i - 1] > ROUND_GAP_MS) rounds.push(e.times[i]);
+    }
+    if (rounds.length < POLLING_MIN_REQUESTS) continue;
+
+    const gaps = rounds.slice(1).map((t, i) => t - rounds[i]).sort((a, b) => a - b);
+    result.push({
+      host: e.host,
+      path: e.path,
+      count: n,
+      rounds: rounds.length,
+      spanSeconds: Math.round(span / 1000),
+      intervalSeconds: Math.round(gaps[Math.floor(gaps.length / 2)] / 1000)
+    });
+  }
+  return result.sort((a, b) => b.rounds - a.rounds);
 }
 
 // ---------------------------------------------------------------------------
@@ -586,16 +659,34 @@ function serializeReport(tab) {
     storage,
     navigation: navigationReport(tab),
     syncs: Object.values(tab.syncs),
-    canvas: Object.values(tab.canvas).sort((a, b) => b.fingerprint - a.fingerprint)
+    canvas: Object.values(tab.canvas).sort((a, b) => b.fingerprint - a.fingerprint),
+    hijack: {
+      sockets: Object.entries(tab.sockets).map(([host, e]) => ({ host, count: e.count, urls: [...e.urls] })),
+      polling: pollingReport(tab),
+      globals: tab.globals
+    }
   };
+}
+
+// Ao abrir o popup, pede ao documento principal um retrato atualizado das
+// globais/funções nativas e dá um instante para a resposta chegar
+async function refreshPage(tabId) {
+  try {
+    await browser.tabs.sendMessage(tabId, { type: "checkGlobals" }, { frameId: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  } catch (e) {
+    // página sem content script (about:, loja de extensões etc.)
+  }
 }
 
 browser.runtime.onMessage.addListener((msg, sender) => {
   if (!msg) return;
 
   if (msg.type === "getReport") {
-    const tab = getTab(msg.tabId);
-    return Promise.resolve(tab ? serializeReport(tab) : null);
+    return refreshPage(msg.tabId).then(() => {
+      const tab = getTab(msg.tabId);
+      return tab ? serializeReport(tab) : null;
+    });
   }
 
   if (msg.type === "userGesture" && sender.tab) {
@@ -612,6 +703,8 @@ browser.runtime.onMessage.addListener((msg, sender) => {
       handleLateHopEvent(tab, sender.url, msg.event);
     } else if (msg.event.kind === "canvas") {
       handleCanvasEvent(tab, sender.url, msg.event);
+    } else if (msg.event.kind === "globals") {
+      if (sender.frameId === 0) tab.globals = msg.event; // último retrato substitui o anterior
     } else {
       handleStorageEvent(tab, sender.url, msg.event);
     }
