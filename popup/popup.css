@@ -23,7 +23,7 @@ li {
 .count { color: #c0392b; }
 .details { color: #666; font-size: 11px; word-break: break-all; }
 
-#third-party, #cookies, #storage, #navigation, #canvas, #hijack { max-height: 220px; }
+#third-party, #cookies, #storage, #navigation, #canvas, #hijack, #blocked, #blocklist { max-height: 220px; }
 
 .alert {
   padding: 6px 8px;
@@ -51,3 +51,29 @@ thead th { font-size: 11px; color: #555; background: #fafafa; }
 }
 .tag.third { background: #fdecea; color: #c0392b; }
 .tag.persistent { background: #fff4e0; color: #b9770e; }
+
+button {
+  font: inherit;
+  font-size: 11px;
+  padding: 1px 8px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  background: #f6f6f6;
+  color: #333;
+  cursor: pointer;
+}
+button:hover { background: #eee; }
+button.danger { color: #c0392b; border-color: #e6b0aa; }
+button:disabled { cursor: default; opacity: 0.6; }
+
+.domain .actions { display: flex; align-items: center; gap: 6px; }
+
+#blocklist-form { display: flex; gap: 6px; margin-bottom: 4px; }
+#blocklist-input {
+  flex: 1;
+  font: inherit;
+  padding: 3px 6px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+}
+#blocklist-message.error { color: #c0392b; }

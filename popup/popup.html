@@ -17,6 +17,12 @@
   </section>
 
   <section>
+    <h2>Bloqueados nesta página</h2>
+    <div id="blocked-summary" class="muted"></div>
+    <ul id="blocked"></ul>
+  </section>
+
+  <section>
     <h2>Cookies injetados</h2>
     <table id="cookie-summary">
       <thead>
@@ -54,6 +60,16 @@
     <h2>Hijacking e hooks</h2>
     <div id="hijack-summary" class="muted"></div>
     <ul id="hijack"></ul>
+  </section>
+
+  <section>
+    <h2>Lista de bloqueio</h2>
+    <form id="blocklist-form">
+      <input id="blocklist-input" type="text" placeholder="ex.: doubleclick.net" autocomplete="off">
+      <button type="submit">Adicionar</button>
+    </form>
+    <div id="blocklist-message" class="muted"></div>
+    <ul id="blocklist"></ul>
   </section>
 
   <script src="popup.js"></script>

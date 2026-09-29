@@ -18,7 +18,17 @@ function renderThirdParty(report) {
   for (const d of report.thirdParty) {
     const li = el("li");
     const head = el("div", "domain");
-    head.append(el("span", "", d.domain), el("span", "count", d.count));
+    const actions = el("span", "actions");
+    if (blocklist.includes(d.domain)) {
+      actions.append(el("span", "tag third", "na lista"));
+    } else {
+      const button = el("button", "danger", "Bloquear");
+      button.title = `Adicionar ${d.domain} (e subdomínios) à lista de bloqueio`;
+      button.addEventListener("click", () => addToBlocklist(d.domain));
+      actions.append(button);
+    }
+    actions.append(el("span", "count", d.count));
+    head.append(el("span", "", d.domain), actions);
 
     const types = Object.entries(d.types).map(([t, n]) => `${t}×${n}`).join(", ");
     li.append(
@@ -304,8 +314,114 @@ function renderHijack(report) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Lista de bloqueio personalizada (browser.storage.local, chave "blocklist")
+// ---------------------------------------------------------------------------
+let blocklist = [];
+let currentTabId = null;
+let currentReport = null;
+
+// Aceita "doubleclick.net", "*.doubleclick.net", "https://ads.x.com/path" ou IPv4
+function normalizeDomain(input) {
+  const d = String(input).trim().toLowerCase()
+    .replace(/^[a-z][a-z0-9+.-]*:\/\//, "")
+    .split(/[/?#]/)[0]
+    .replace(/:\d+$/, "")
+    .replace(/^\*\./, "")
+    .replace(/^\.+|\.+$/g, "");
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(d)) return d;
+  return /^([a-z0-9-]+\.)+[a-z0-9-]{2,}$/.test(d) ? d : null;
+}
+
+async function saveBlocklist(list) {
+  blocklist = [...new Set(list)].sort();
+  await browser.storage.local.set({ blocklist });
+  renderBlocklist();
+  if (currentReport) renderThirdParty(currentReport);
+  showReloadHint();
+}
+
+function addToBlocklist(domain) {
+  return saveBlocklist(blocklist.concat(domain));
+}
+
+function removeFromBlocklist(domain) {
+  return saveBlocklist(blocklist.filter((d) => d !== domain));
+}
+
+// A lista vale para as próximas requisições: o que já carregou continua na página
+function showReloadHint() {
+  const msg = document.getElementById("blocklist-message");
+  msg.className = "muted";
+  msg.textContent = "Lista atualizada. Recarregue a página para aplicar. ";
+  if (currentTabId !== null) {
+    const button = el("button", "", "Recarregar página");
+    button.addEventListener("click", () => {
+      browser.tabs.reload(currentTabId);
+      window.close();
+    });
+    msg.append(button);
+  }
+}
+
+function renderBlocklist() {
+  const list = document.getElementById("blocklist");
+  list.textContent = "";
+  if (!blocklist.length) {
+    list.append(el("li", "details", "Nenhum domínio na lista."));
+    return;
+  }
+  for (const domain of blocklist) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const button = el("button", "", "Remover");
+    button.addEventListener("click", () => removeFromBlocklist(domain));
+    head.append(el("span", "", domain), button);
+    li.append(head, el("div", "details", `bloqueia ${domain} e *.${domain}`));
+    list.append(li);
+  }
+}
+
+function renderBlocked(report) {
+  const total = report.blocked.reduce((n, b) => n + b.count, 0);
+  document.getElementById("blocked-summary").textContent =
+    `${total} requisição(ões) bloqueada(s) pela lista personalizada`;
+
+  const list = document.getElementById("blocked");
+  list.textContent = "";
+  for (const b of report.blocked) {
+    const li = el("li");
+    const head = el("div", "domain");
+    const name = el("span", "", b.rule);
+    name.append(el("span", "tag third", "bloqueado"));
+    head.append(name, el("span", "count", b.count));
+    const types = Object.entries(b.types).map(([t, n]) => `${t}×${n}`).join(", ");
+    li.append(head, el("div", "details", b.hosts.join(", ")), el("div", "details", types));
+    list.append(li);
+  }
+}
+
+document.getElementById("blocklist-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const input = document.getElementById("blocklist-input");
+  const domain = normalizeDomain(input.value);
+  const msg = document.getElementById("blocklist-message");
+  if (!domain) {
+    msg.className = "error";
+    msg.textContent = "Domínio inválido. Use, por exemplo, doubleclick.net";
+    return;
+  }
+  input.value = "";
+  addToBlocklist(domain);
+});
+
 async function init() {
+  const stored = await browser.storage.local.get("blocklist");
+  blocklist = Array.isArray(stored.blocklist) ? stored.blocklist : [];
+  renderBlocklist();
+
   const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+  currentTabId = tab.id;
   const report = await browser.runtime.sendMessage({ type: "getReport", tabId: tab.id });
 
   if (!report) {
@@ -313,10 +429,12 @@ async function init() {
       "Sem dados para esta aba. Recarregue a página.";
     return;
   }
+  currentReport = report;
 
   document.getElementById("page").textContent =
     `${report.pageHost} (site: ${report.pageBaseDomain})`;
   renderThirdParty(report);
+  renderBlocked(report);
   renderCookies(report);
   renderStorage(report);
   renderNavigation(report);
