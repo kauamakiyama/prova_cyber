@@ -179,3 +179,26 @@ A extensão usa cópias de `postMessage` e `Function.prototype.toString` guardad
 - Globais adicionadas são comuns em sites legítimos (bibliotecas, analytics); o número sozinho não indica ataque. O que pesa são funções nativas sobrescritas, canais persistentes com terceiros e assinaturas conhecidas.
 - Polling com intervalo maior que o período observado, ou que muda de caminho a cada chamada, não é agrupado.
 - Uma função nativa sobrescrita e depois restaurada entre duas verificações não é detectada.
+
+### Lista de bloqueio personalizada
+
+O usuário mantém uma lista de domínios bloqueados, salva em `browser.storage.local` (chave `blocklist`), que persiste entre sessões e sobrevive a recarregar a extensão.
+
+**No popup:**
+- seção **Lista de bloqueio**: campo para adicionar um domínio e botão **Remover** em cada entrada. A entrada é normalizada: aceita `doubleclick.net`, `*.doubleclick.net`, `https://ads.exemplo.com/caminho` (vira `ads.exemplo.com`) ou IPv4; entradas inválidas são recusadas;
+- botão **Bloquear** ao lado de cada domínio da seção "Domínios de terceira parte" (adiciona o eTLD+1);
+- seção **Bloqueados nesta página**: regras que bloquearam algo nesta aba, com hosts, contagem e tipos de requisição;
+- depois de alterar a lista, o popup oferece **Recarregar página** (o que já carregou continua na página).
+
+**No background:**
+- a lista é carregada na inicialização e atualizada por `storage.onChanged`, sem precisar recarregar a extensão;
+- `webRequest.onBeforeRequest` com `["blocking"]` (permissão `webRequestBlocking`) retorna `{ cancel: true }` quando o host da requisição **é o domínio da lista ou um subdomínio dele** (`host === d || host.endsWith("." + d)`). `doubleclick.net` bloqueia `securepubads.g.doubleclick.net`, mas não `notdoubleclick.net`;
+- vale para todos os tipos de requisição, inclusive `websocket`, e também para requisições **sem aba** (`tabId -1`, ex.: feitas por service workers);
+- a navegação principal (`main_frame`) **não** é bloqueada: a lista age sobre os recursos que as páginas carregam;
+- requisição bloqueada não chega a conectar, então entra só em "Bloqueados nesta página", e não nas estatísticas de 3ª parte, cookies etc.
+
+**Teste de referência:** a página *Request Blocking* do DDG (`/privacy-protections/request-blocking/`) pede explicitamente para adicionar `bad.third-party.site` à lista de bloqueio e testa 23 mecanismos de requisição (img, script, fetch, XHR, WebSocket, sendBeacon, iframes, workers, CSS, favicon…).
+
+**Limitações:**
+- Bloqueio só por domínio (sem caminhos nem expressões como nas listas do uBlock Origin/EasyList).
+- Requisições que o Firefox não expõe ao `webRequest` de extensões (ex.: algumas cargas internas do navegador) não podem ser bloqueadas.
