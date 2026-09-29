@@ -62,7 +62,7 @@ Content scripts rodam em um "mundo isolado": veem o DOM da página, mas não os 
 1. **Inline:** cria um `<script>` com o código da função; ele executa de forma síncrona, **antes** dos scripts do site.
 2. **Fallback:** se a CSP da página bloquear scripts inline, injeta `<script src="moz-extension://…/inject.js">` (declarado em `web_accessible_resources`).
 
-O `inject.js` se comunica com o `content.js` via `window.postMessage`, com um token aleatório por frame para descartar mensagens que não vieram do hook; o `content.js` repassa ao background com `runtime.sendMessage`.
+O `inject.js` se comunica com o `content.js` por um **evento com nome secreto** (`privacy-guard-<token>`, token aleatório por frame), com o conteúdo em JSON no `detail`; o `content.js` repassa ao background com `runtime.sendMessage`. **Não** se usa `window.postMessage`: páginas que escutam o evento `message` sem filtrar a origem recebiam as mensagens da extensão e as confundiam com as próprias. Foi isso que quebrou o teste *Storage Partitioning* do DDG, cuja página aceita a primeira mensagem que chegar (`addEventListener('message', …, { once: true })`).
 
 Detecção feita no contexto da página:
 
@@ -171,7 +171,7 @@ O diff é feito 3 s, 10 s e 30 s após o `DOMContentLoaded` (não o `load`, que 
 | Global adicionada | propriedade nova em `window` que não é função nativa do navegador (APIs resolvidas sob demanda são ignoradas) nem índice numérico (`window[0]`… são os iframes da página); globais de bibliotecas conhecidas são identificadas (`dataLayer` = Google Tag Manager, `fbq` = Meta Pixel, `pbjs` = Prebid.js, `hj` = Hotjar…) |
 | Assinatura do BeEF | global `beef` / `BeefJS` / `beef_init` ou `<script src=".../hook.js">` |
 
-A extensão usa cópias de `postMessage` e `Function.prototype.toString` guardadas no início, de modo que um script que as sobrescreva não consegue silenciar o relatório.
+A extensão usa cópias de `EventTarget.prototype.dispatchEvent`, `CustomEvent`, `JSON.stringify` e `Function.prototype.toString` guardadas no início, de modo que um script que as sobrescreva não consegue silenciar o relatório.
 
 **Pegada da própria extensão:** a extensão não substitui construtores globais (`WebSocket`, `fetch`…) justamente para não alterar o ambiente que ela mesma avalia. Os hooks de storage e canvas alteram métodos de protótipos (`Storage.prototype.setItem`, `IDBFactory.prototype.open`, `HTMLCanvasElement.prototype.toDataURL`…), o que é visível para uma página que inspecione esses métodos (ex.: página js-leaks do DDG).
 
