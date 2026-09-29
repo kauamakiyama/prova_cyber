@@ -1,9 +1,9 @@
 "use strict";
 
 // Ponte entre a página e o background: injeta o hook do inject.js no contexto
-// da página e repassa ao background as mensagens que ele envia via postMessage.
+// da página e repassa ao background as mensagens que ele envia.
 
-// Token aleatório por frame: filtra mensagens que não vieram do nosso hook
+// Token aleatório por frame: compõe o nome secreto do canal com o hook
 const token = Math.random().toString(36).slice(2) + Date.now().toString(36);
 
 function injectInline() {
@@ -45,19 +45,25 @@ if (window === window.top) {
   window.addEventListener("keydown", onGesture, true);
 }
 
+// Canal com o hook da página: evento com nome secreto em vez de postMessage,
+// para não interferir em páginas que escutam "message" (ver inject.js)
+const channel = "privacy-guard-" + token;
+
 // Pedido do background (popup aberto): repassa ao hook da página
 if (window === window.top) {
   browser.runtime.onMessage.addListener((msg) => {
     if (msg && msg.type === "checkGlobals") {
-      window.postMessage({ __privacyGuardCmd: token, cmd: "checkGlobals" }, "*");
+      window.dispatchEvent(new CustomEvent(channel + "-check-globals"));
     }
   });
 }
 
-window.addEventListener("message", (event) => {
-  if (event.source !== window) return;
-  const data = event.data;
-  if (!data || data.__privacyGuard !== token) return;
-  delete data.__privacyGuard;
+window.addEventListener(channel, (event) => {
+  let data;
+  try {
+    data = JSON.parse(event.detail);
+  } catch (e) {
+    return;
+  }
   browser.runtime.sendMessage({ type: "pageEvent", event: data }).catch(() => {});
 });

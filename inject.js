@@ -13,13 +13,21 @@ function privacyGuardPageHook(token) {
   document.documentElement.setAttribute("data-privacy-guard", token);
 
   // Referências guardadas antes dos scripts da página: um script que sobrescreva
-  // window.postMessage ou Function.prototype.toString não afeta a extensão
-  const nativePostMessage = window.postMessage.bind(window);
+  // dispatchEvent, JSON.stringify ou Function.prototype.toString não afeta a extensão
+  const nativeDispatch = EventTarget.prototype.dispatchEvent;
+  const NativeCustomEvent = window.CustomEvent;
+  const nativeStringify = JSON.stringify;
   const nativeToString = Function.prototype.toString;
 
+  // Canal com o content.js: evento com nome secreto (token aleatório por frame).
+  // NÃO usar window.postMessage: páginas que escutam "message" sem filtrar a
+  // origem recebem a mensagem e a confundem com as próprias (quebrava o teste
+  // Storage Partitioning do DDG). O detalhe vai como string JSON para o content
+  // script ler sem depender de Xray.
+  const channel = "privacy-guard-" + token;
+
   function post(data) {
-    data.__privacyGuard = token;
-    nativePostMessage(data, "*");
+    nativeDispatch.call(window, new NativeCustomEvent(channel, { detail: nativeStringify(data) }));
   }
 
   // URL do script que chamou a API: pula os frames do próprio hook na pilha
@@ -467,12 +475,7 @@ function privacyGuardPageHook(token) {
   });
 
   // Verificação sob demanda: o popup pede um retrato atualizado ao abrir
-  window.addEventListener("message", (event) => {
-    if (event.source !== window || !event.data) return;
-    if (event.data.__privacyGuardCmd === token && event.data.cmd === "checkGlobals") {
-      checkGlobals();
-    }
-  });
+  window.addEventListener(channel + "-check-globals", () => checkGlobals());
 }
 
 // Modo fallback (<script src>): o token vem no atributo data do próprio script.
