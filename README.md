@@ -202,3 +202,46 @@ O usuário mantém uma lista de domínios bloqueados, salva em `browser.storage.
 **Limitações:**
 - Bloqueio só por domínio (sem caminhos nem expressões como nas listas do uBlock Origin/EasyList).
 - Requisições que o Firefox não expõe ao `webRequest` de extensões (ex.: algumas cargas internas do navegador) não podem ser bloqueadas.
+
+## Score de privacidade
+
+O popup mostra, no topo, uma nota de **0 a 100** para a página atual, com a classificação e a perda em cada critério. A nota é recalculada toda vez que o popup é aberto, a partir do que as detecções acima registraram na aba.
+
+### Metodologia
+
+A página **começa com 100 pontos** e perde pontos em **7 critérios**. Cada critério tem um **peso**, que é a perda máxima possível nele; os pesos somam 100. Dentro do peso, a perda cresce com a quantidade observada.
+
+| # | Critério | Peso | Perda | Justificativa |
+|---|---|---|---|---|
+| 1 | Domínios de 3ª parte | 20 | 1 por domínio (eTLD+1) contatado | Cada terceiro recebe, em toda requisição, IP, User-Agent e `Referer` (a página que o usuário está lendo). É a base de qualquer rastreamento entre sites. |
+| 2 | Cookies de 3ª parte | 20 | 2 por cookie **persistente**, 1 por cookie **de sessão** | Principal mecanismo de identificação entre sites. O persistente pesa o dobro porque sobrevive ao fechamento do navegador e permite reconhecer o usuário semanas depois. |
+| 3 | Cookie sync, bounce e IDs na URL | 15 | 5 por sincronização de cookie, por salto de bounce e por ID repassado; 3 por identificador na URL; 2 por parâmetro de rastreamento (`gclid`, `utm_*`…) | Técnicas que **ligam identidades** entre domínios e contornam o isolamento de cookies do navegador (Total Cookie Protection). |
+| 4 | Canvas fingerprint | 15 | 15 se extraído por script de **3ª parte**; 10 se de 1ª parte | Identifica o dispositivo sem cookie, sem consentimento e sem que o usuário consiga apagar. Por 3ª parte, o mesmo identificador vale em todos os sites onde o script está. |
+| 5 | Session replay e pixels | 10 | 5 por ferramenta de session replay (Microsoft Clarity, Hotjar, FullStory); 3 por pixel de rede social/anúncio (Meta, TikTok, LinkedIn, Microsoft UET). Contagem por **fornecedor**: `fbq` e `_fbq` são o mesmo Meta Pixel | Session replay grava cliques, rolagem e digitação; pixels enviam a navegação para a plataforma de anúncio. Correspondem aos testes *session recording* e *Facebook pixel* do Blacklight. |
+| 6 | Hijacking/hook | 10 | 4 por WebSocket de 3ª parte; 2 por polling persistente; 2 por função nativa sobrescrita sem autor conhecido; 0,5 por função sobrescrita por biblioteca conhecida (Sentry etc.) | Canais persistentes com terceiros e interceptação de APIs são o que um script injetado precisa para receber comandos e ler o tráfego da página. |
+| 7 | Armazenamento de 3ª parte | 10 | 2 por chave de 3ª parte (localStorage, sessionStorage, IndexedDB); 1 a cada 20 chaves de 1ª parte | Storage de 3ª parte guarda identificadores fora do alcance da limpeza de cookies. O de 1ª parte pesa pouco: normalmente são preferências e estado do próprio site. |
+
+**Regra especial: BeEF.** Se a assinatura do BeEF é detectada, o score fica **limitado a 20**, independentemente dos outros critérios. Framework de exploração ativo significa navegador comprometido, e não só rastreado.
+
+**Classificação:**
+
+| Score | Classificação |
+|---|---|
+| 85 a 100 | **Boa** |
+| 65 a 84 | **Moderada** |
+| 40 a 64 | **Ruim** |
+| 0 a 39 | **Crítica** |
+
+As faixas foram calibradas nos testes: uma página de teste com **um único** comportamento isolado (ex.: canvas fingerprint de 1ª parte, 90) fica em "Boa"; um site com uma dúzia de rastreadores e alguns cookies de 3ª parte cai para "Moderada"; um portal com leilão de anúncios (dezenas de domínios, cookies e sincronizações) fica em "Crítica".
+
+**Requisições bloqueadas** pela lista personalizada não contam: elas não chegaram a acontecer. Bloquear rastreadores melhora a nota da página.
+
+### Relação com o Blacklight
+
+O Blacklight (The Markup) roda 7 testes e reporta cada um como presente/ausente, sem nota numérica: rastreadores de anúncio, cookies de 3ª parte, canvas fingerprinting, session recording, key logging, Facebook pixel e Google Analytics "remarketing audiences". O score cobre diretamente 4 deles (rastreadores de 3ª parte, cookies de 3ª parte, canvas fingerprinting, session recording + Meta Pixel) e acrescenta o que o Blacklight não mede: cookie sync/bounce, storage de 3ª parte e indicadores de hijacking.
+
+**Limitações:**
+- Os pesos são uma escolha de projeto, justificada acima, e não uma medida absoluta de risco.
+- "Domínios de 3ª parte" usa eTLD+1: domínios do próprio grupo do site (ex.: `glbimg.com` no `globo.com`) contam como 3ª parte.
+- Key logging não é detectado diretamente; aparece de forma indireta quando uma ferramenta de session replay é identificada.
+- O critério 5 depende das globais da página. Até a primeira verificação (poucos segundos após o `DOMContentLoaded`), o popup marca o score como **parcial**.
