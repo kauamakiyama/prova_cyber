@@ -658,6 +658,104 @@ function navigationReport(tab) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Score de privacidade
+// ---------------------------------------------------------------------------
+// A página começa com 100 pontos e perde pontos em 7 critérios. Cada critério
+// tem um teto (peso); os pesos somam 100. Metodologia e justificativa no README.
+// Globais -> fornecedor. A contagem é por fornecedor: fbq e _fbq são o mesmo
+// Meta Pixel, hj e _hjSettings o mesmo Hotjar.
+const SESSION_REPLAY_GLOBALS = {
+  clarity: "Microsoft Clarity", hj: "Hotjar", _hjSettings: "Hotjar", FS: "FullStory"
+};
+const PIXEL_GLOBALS = {
+  fbq: "Meta Pixel", _fbq: "Meta Pixel", ttq: "TikTok Pixel",
+  uetq: "Microsoft UET", _linkedin_partner_id: "LinkedIn Insight Tag"
+};
+
+function vendorsOf(names, table) {
+  return [...new Set(names.filter((n) => table[n]).map((n) => table[n]))];
+}
+
+function scoreGrade(score) {
+  if (score >= 85) return "Boa";
+  if (score >= 65) return "Moderada";
+  if (score >= 40) return "Ruim";
+  return "Crítica";
+}
+
+function computeScore(r) {
+  const criteria = [];
+  function add(id, label, weight, raw, detail) {
+    const penalty = Math.min(weight, Math.round(raw * 10) / 10);
+    criteria.push({ id, label, weight, penalty, detail });
+  }
+
+  // 1. Domínios de 3ª parte: cada terceiro recebe IP, User-Agent e Referer
+  add("third-party", "Domínios de 3ª parte", 20, r.thirdParty.length,
+    `${r.thirdParty.length} domínio(s) × 1`);
+
+  // 2. Cookies de 3ª parte: persistentes pesam o dobro (sobrevivem à sessão)
+  const c3 = r.cookies.filter((c) => c.thirdParty);
+  const c3p = c3.filter((c) => !c.session).length;
+  const c3s = c3.length - c3p;
+  add("cookies", "Cookies de 3ª parte", 20, c3p * 2 + c3s,
+    `${c3p} persistente(s) × 2 + ${c3s} de sessão × 1`);
+
+  // 3. Ligação de identidades entre domínios
+  const nav = r.navigation;
+  const final = nav.chain[nav.chain.length - 1];
+  const linking = r.syncs.length + nav.bounces.length + nav.passed.length;
+  add("linking", "Cookie sync, bounce e IDs na URL", 15,
+    linking * 5 + final.params.ids.length * 3 + final.params.tracking.length * 2,
+    `${r.syncs.length} sync + ${nav.bounces.length} bounce + ${nav.passed.length} ID repassado (× 5), ` +
+    `${final.params.ids.length} identificador(es) × 3, ${final.params.tracking.length} parâmetro(s) de rastreamento × 2`);
+
+  // 4. Canvas fingerprint: identifica sem cookie; 3ª parte pesa mais
+  const fp = r.canvas.filter((c) => c.fingerprint);
+  const fp3 = fp.some((c) => c.thirdParty);
+  add("canvas", "Canvas fingerprint", 15, fp3 ? 15 : fp.length ? 10 : 0,
+    fp.length ? `${fp.length} extração(ões) de fingerprint${fp3 ? " por script de 3ª parte" : " (1ª parte)"}` : "nenhuma");
+
+  // 5. Session replay e pixels de rastreamento (equivalem a testes do Blacklight)
+  const g = r.hijack.globals;
+  const known = g ? g.known.map((k) => k.name) : [];
+  const replay = vendorsOf(known, SESSION_REPLAY_GLOBALS);
+  const pixels = vendorsOf(known, PIXEL_GLOBALS);
+  add("replay-pixels", "Session replay e pixels", 10, replay.length * 5 + pixels.length * 3,
+    g ? `session replay: ${replay.join(", ") || "nenhum"} (× 5); pixels: ${pixels.join(", ") || "nenhum"} (× 3)`
+      : "globais ainda não verificadas");
+
+  // 6. Hijacking/hook: BeEF zera o critério
+  const h = r.hijack;
+  const natives = g ? g.natives : [];
+  const nUnknown = natives.filter((n) => !n.by).length;
+  const nKnown = natives.length - nUnknown;
+  add("hijack", "Hijacking/hook", 10,
+    g && g.beef ? 10 : h.sockets.length * 4 + h.polling.length * 2 + nUnknown * 2 + nKnown * 0.5,
+    g && g.beef ? "assinatura do BeEF"
+      : `${h.sockets.length} WebSocket × 4, ${h.polling.length} polling × 2, ` +
+        `${nUnknown} nativa(s) sem autor × 2, ${nKnown} com autor conhecido × 0,5`);
+
+  // 7. Armazenamento: chaves de 3ª parte guardam IDs fora do alcance dos cookies
+  const keys = (third) => r.storage.filter((s) => s.thirdParty === third)
+    .reduce((n, s) => n + s.localStorage.length + s.sessionStorage.length + s.indexedDB.length, 0);
+  const k3 = keys(true);
+  const k1 = keys(false);
+  add("storage", "Armazenamento de 3ª parte", 10, k3 * 2 + Math.floor(k1 / 20),
+    `${k3} chave(s) de 3ª parte × 2 + ${k1} de 1ª parte ÷ 20`);
+
+  const total = criteria.reduce((n, c) => n + c.penalty, 0);
+  let score = Math.max(0, Math.round(100 - total));
+
+  // BeEF não é rastreamento, é comprometimento ativo do navegador: por mais
+  // limpa que a página seja no resto, o score fica no máximo em 20 (Crítica)
+  const beefCap = !!(g && g.beef);
+  if (beefCap) score = Math.min(score, 20);
+
+  return { score, grade: scoreGrade(score), criteria, partial: !g, beefCap };
+}
+
 function serializeReport(tab) {
   const thirdParty = Object.entries(tab.thirdParty)
     .map(([domain, e]) => ({
@@ -691,7 +789,7 @@ function serializeReport(tab) {
     .filter((s) => STORAGE_APIS.some((api) => s[api].length) || s.blocked.length)
     .sort((a, b) => a.thirdParty - b.thirdParty);
 
-  return {
+  const report = {
     pageUrl: tab.pageUrl,
     pageHost: tab.pageHost,
     pageBaseDomain: getBaseDomain(tab.pageHost),
@@ -713,6 +811,8 @@ function serializeReport(tab) {
       .map(([rule, e]) => ({ rule, count: e.count, hosts: [...e.hosts], types: e.types }))
       .sort((a, b) => b.count - a.count)
   };
+  report.score = computeScore(report);
+  return report;
 }
 
 // Ao abrir o popup, pede ao documento principal um retrato atualizado das
