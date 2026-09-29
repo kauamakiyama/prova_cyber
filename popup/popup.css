@@ -77,3 +77,20 @@ button:disabled { cursor: default; opacity: 0.6; }
   border-radius: 3px;
 }
 #blocklist-message.error { color: #c0392b; }
+
+#score-box { display: flex; align-items: baseline; gap: 10px; margin-bottom: 4px; }
+#score-value { font-size: 32px; font-weight: 700; }
+#score-grade {
+  padding: 2px 10px;
+  border-radius: 12px;
+  font-weight: 700;
+  font-size: 13px;
+}
+.grade-boa { background: #e6f4ea; color: #1e7e34; }
+.grade-moderada { background: #fff4e0; color: #b9770e; }
+.grade-ruim { background: #fdecea; color: #c0392b; }
+.grade-critica { background: #c0392b; color: #fff; }
+
+#score-criteria td:first-child { font-size: 12px; }
+#score-criteria td:first-child .details { font-weight: normal; }
+#score-criteria td:last-child { white-space: nowrap; font-weight: 600; }

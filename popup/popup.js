@@ -314,6 +314,30 @@ function renderHijack(report) {
   }
 }
 
+function renderScore(report) {
+  const { score, grade, criteria, partial, beefCap } = report.score;
+  document.getElementById("score-value").textContent = `${score}/100`;
+  const gradeEl = document.getElementById("score-grade");
+  gradeEl.textContent = grade;
+  gradeEl.className = { "Boa": "grade-boa", "Moderada": "grade-moderada", "Ruim": "grade-ruim", "Crítica": "grade-critica" }[grade];
+
+  const notes = [];
+  if (beefCap) notes.push("Limitado a 20: assinatura do BeEF (navegador comprometido).");
+  if (partial) notes.push("Parcial: globais da página ainda não verificadas.");
+  notes.push("Começa em 100; cada critério desconta até o seu peso.");
+  document.getElementById("score-note").textContent = notes.join(" ");
+
+  const tbody = document.querySelector("#score-criteria tbody");
+  tbody.textContent = "";
+  for (const c of criteria) {
+    const tr = el("tr");
+    const label = el("td", "", c.label);
+    label.append(el("div", "details", c.detail));
+    tr.append(label, el("td", c.penalty ? "count" : "", `−${c.penalty} / ${c.weight}`));
+    tbody.append(tr);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Lista de bloqueio personalizada (browser.storage.local, chave "blocklist")
 // ---------------------------------------------------------------------------
@@ -433,6 +457,7 @@ async function init() {
 
   document.getElementById("page").textContent =
     `${report.pageHost} (site: ${report.pageBaseDomain})`;
+  renderScore(report);
   renderThirdParty(report);
   renderBlocked(report);
   renderCookies(report);
