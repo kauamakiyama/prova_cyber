@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Privacy Guard",
-  "version": "0.6.0",
-  "description": "Detecta conexões a domínios de terceira parte, cookies injetados, armazenamento HTML5, bounce tracking, cookie sync, canvas fingerprint e indicadores de hijacking durante a navegação.",
+  "version": "0.7.0",
+  "description": "Detecta conexões a domínios de terceira parte, cookies injetados, armazenamento HTML5, bounce tracking, cookie sync, canvas fingerprint e indicadores de hijacking durante a navegação, com lista de bloqueio personalizada.",
 
   "browser_specific_settings": {
     "gecko": {
@@ -13,6 +13,8 @@
 
   "permissions": [
     "webRequest",
+    "webRequestBlocking",
+    "storage",
     "tabs",
     "<all_urls>"
   ],

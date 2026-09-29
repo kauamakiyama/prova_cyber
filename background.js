@@ -65,7 +65,8 @@ function isThirdParty(requestHost, pageHost) {
 //   canvas: { [método|script|fingerprint|webgl]: { method, script, fingerprint, ... } },
 //   sockets: { [host]: { count, urls: Set } },
 //   endpoints: { [host+path]: { host, path, times: [ms] } },
-//   globals: último relatório de globais/funções nativas do inject.js | null
+//   globals: último relatório de globais/funções nativas do inject.js | null,
+//   blocked: { [regra da lista]: { count, hosts: Set, types: { [tipo]: n } } }
 // }
 const tabData = {};
 
@@ -87,7 +88,8 @@ function resetTab(tabId, url, chain) {
     canvas: {},
     sockets: {},
     endpoints: {},
-    globals: null
+    globals: null,
+    blocked: {}
   };
   updateBadge(tabId);
 }
@@ -109,24 +111,65 @@ function ensureTab(details) {
 }
 
 // ---------------------------------------------------------------------------
-// Detecção de requisições de terceira parte
+// Lista de bloqueio personalizada (browser.storage.local, chave "blocklist")
+// ---------------------------------------------------------------------------
+// Cada entrada é um domínio; bloqueia o próprio domínio e todos os subdomínios
+// (ex.: "doubleclick.net" bloqueia "securepubads.g.doubleclick.net").
+let blocklist = [];
+
+browser.storage.local.get("blocklist").then(({ blocklist: list }) => {
+  blocklist = Array.isArray(list) ? list : [];
+});
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.blocklist) {
+    blocklist = changes.blocklist.newValue || [];
+  }
+});
+
+function matchBlocklist(host) {
+  return blocklist.find((d) => host === d || host.endsWith("." + d)) || null;
+}
+
+function recordBlocked(tab, rule, host, type) {
+  let entry = tab.blocked[rule];
+  if (!entry) entry = tab.blocked[rule] = { count: 0, hosts: new Set(), types: {} };
+  entry.count++;
+  entry.hosts.add(host);
+  entry.types[type] = (entry.types[type] || 0) + 1;
+}
+
+// ---------------------------------------------------------------------------
+// Detecção de requisições de terceira parte (e aplicação da lista de bloqueio)
 // ---------------------------------------------------------------------------
 browser.webRequest.onBeforeRequest.addListener(
   (details) => {
-    if (details.tabId < 0) return; // requisições que não pertencem a uma aba
-
-    // Nova navegação no frame principal: zera o relatório da aba
+    // Nova navegação no frame principal: zera o relatório da aba. A navegação
+    // em si nunca é bloqueada; a lista vale para os recursos da página.
     if (details.type === "main_frame") {
-      startNavigation(details);
+      if (details.tabId >= 0) startNavigation(details);
       return;
     }
 
-    const tab = ensureTab(details);
-    if (!tab) return;
+    // A lista vale também para requisições sem aba (tabId -1), como as feitas
+    // por service workers; essas só não entram no relatório de nenhuma aba
+    const reqHost = getHostname(details.url);
+    const rule = reqHost && matchBlocklist(reqHost);
+    const tab = details.tabId >= 0 ? ensureTab(details) : null;
 
+    if (rule) {
+      // Requisição cancelada não chega a conectar: não entra nas estatísticas
+      // de 3ª parte, só na contagem de bloqueios
+      if (tab) {
+        recordBlocked(tab, rule, reqHost, details.type);
+        updateBadge(details.tabId);
+      }
+      return { cancel: true };
+    }
+
+    if (!tab) return;
     tab.totalRequests++;
 
-    const reqHost = getHostname(details.url);
     if (!reqHost || !isThirdParty(reqHost, tab.pageHost)) return;
 
     const base = getBaseDomain(reqHost);
@@ -142,7 +185,8 @@ browser.webRequest.onBeforeRequest.addListener(
     trackPersistentChannel(tab, details);
     updateBadge(details.tabId);
   },
-  { urls: ["<all_urls>"] }
+  { urls: ["<all_urls>"] },
+  ["blocking"]
 );
 
 // ---------------------------------------------------------------------------
@@ -664,7 +708,10 @@ function serializeReport(tab) {
       sockets: Object.entries(tab.sockets).map(([host, e]) => ({ host, count: e.count, urls: [...e.urls] })),
       polling: pollingReport(tab),
       globals: tab.globals
-    }
+    },
+    blocked: Object.entries(tab.blocked)
+      .map(([rule, e]) => ({ rule, count: e.count, hosts: [...e.hosts], types: e.types }))
+      .sort((a, b) => b.count - a.count)
   };
 }
 
